@@ -320,6 +320,29 @@ export function addArtifact(id: string, artifact: Artifact) {
   changed(id);
 }
 
+/**
+ * Merge fields into run.summary (object-ifying a non-object summary) —
+ * used to lift post-hoc metrics (score, subscores) into the run record.
+ * A patch value of `undefined` deletes the key, so a rerun analysis that
+ * drops a metric also removes the previously lifted field.
+ */
+export function mergeSummary(id: string, patch: Record<string, unknown>) {
+  const run = getRun(id);
+  if (!run) return;
+  const base =
+    run.summary !== null && typeof run.summary === "object" && !Array.isArray(run.summary)
+      ? (run.summary as Record<string, unknown>)
+      : {};
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  run.summary = merged;
+  persist();
+  changed(id);
+}
+
 /** Remove the run record and its directory. Caller must ensure it is not running. */
 export function removeRun(id: string) {
   const i = state.runs.findIndex((r) => r.id === id);
@@ -334,7 +357,7 @@ export function removeRun(id: string) {
 const artifactUrl = (runId: string, basename: string) =>
   `/artifacts/${runId}/${encodeURIComponent(basename)}`;
 
-function classify(basename: string): ArtifactKind {
+export function classify(basename: string): ArtifactKind {
   const lower = basename.toLowerCase();
   const ext = path.extname(lower);
   if ([".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp"].includes(ext))
