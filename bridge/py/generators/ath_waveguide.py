@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from blab.ath import (
+    ath_mirror_axes_for_result,
     clean_ath_mesh_output,
     clean_ath_reduced_mesh_output,
     run_ath,
@@ -238,7 +239,11 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
     result = run_ath(ath_exe=ATH_EXE, config_text=config_text, run_root=out_dir, case_name=name, timeout_s=180.0)
 
     emit({"event": "progress", "stage": "clean", "message": "Cleaning Ath mesh output"})
-    result = clean_ath_mesh_output(result)
+    # Which planes Ath mirrored the reduced mesh across (from its solving file):
+    # quadrants=1 -> ("x","y"), quadrants=14 -> ("x",). Persisted in the result
+    # so cmd_solve can refuse a symmetry setting the reduced mesh was not built for.
+    mirror_axes = ath_mirror_axes_for_result(result)
+    result = clean_ath_mesh_output(result, mirror_axes=mirror_axes)
     result = clean_ath_reduced_mesh_output(result)
 
     triangles, bbox_mm = mesh_stats(result.cleaned_msh_path)
@@ -247,6 +252,7 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
         "mesh_path": str(result.msh_path),
         "cleaned_msh_path": str(result.cleaned_msh_path),
         "reduced_msh_path": str(result.reduced_cleaned_msh_path),
+        "mirror_axes": list(mirror_axes),
         "stl_path": str(stl_matches[0]) if stl_matches else None,
         "triangles": triangles,
         "bbox_mm": bbox_mm,

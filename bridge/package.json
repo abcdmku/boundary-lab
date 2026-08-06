@@ -8,6 +8,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "postinstall": "cd ui && npm install",
+    "prestart": "cd ui && npm run build",
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit"
