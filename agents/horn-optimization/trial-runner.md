@@ -17,7 +17,9 @@ already contain a line for this trial number — if it does, stop and report ins
 writing a duplicate. For `verify` trials: overlay `spec.mesh_verify_params` (if present)
 onto the given params before generating — these are resolution-only generator parameters
 (e.g. an element-size override) that refine the mesh without touching the champion's
-geometry; use `spec.solve_verify` instead of `spec.solve`,
+geometry. The generate layer has a built-in 9000-triangle guard: a verify mesh expected
+to exceed it needs `"allow_large": true` (JSON boolean) in the generate params — never
+set it on iteration trials. Use `spec.solve_verify` instead of `spec.solve`,
 `spec.mesh.verify_max_triangles` (if present) instead of `spec.mesh.max_triangles`, and
 `spec.solve_verify_timeout_min` (default 3 × `solve_timeout_min`) as the timeout — fine
 meshes can legitimately take an hour or more.
