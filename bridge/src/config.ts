@@ -15,6 +15,13 @@ const repoRoot = process.env.REPO_ROOT ?? path.resolve(bridgeRoot, "..");
  */
 export const config = {
   port,
+  /**
+   * Listen address. Default loopback: the API/MCP surface is unauthenticated,
+   * so it must not be reachable from a LAN/tailnet unless explicitly opted in
+   * (BRIDGE_HOST=0.0.0.0 — only do this behind a trusted network boundary
+   * such as a tailnet ACL, and set BRIDGE_PUBLIC_URL to match).
+   */
+  host: process.env.BRIDGE_HOST ?? "127.0.0.1",
   publicUrl: (process.env.BRIDGE_PUBLIC_URL ?? `http://127.0.0.1:${port}`).replace(/\/$/, ""),
   repoRoot,
   bridgeRoot,
