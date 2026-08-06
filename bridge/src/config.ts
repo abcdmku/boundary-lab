@@ -25,10 +25,13 @@ export const config = {
   dataDir: process.env.DATA_DIR ?? path.join(bridgeRoot, "data"),
   t3BaseUrl: process.env.T3_BASE_URL?.replace(/\/$/, "") ?? null,
   t3Token: process.env.T3_TOKEN ?? null,
-  /** Passed through to python children so the Julia solver backend resolves. */
-  juliaExecutable:
-    process.env.BLAB_JULIA_EXECUTABLE ??
-    "C:/Users/Borg/AppData/Local/Programs/Julia-1.12.6/bin/julia.exe",
+  /**
+   * Optional explicit Julia override for python children. When null (no env
+   * set), nothing is passed down and blabctl.resolve_julia_exe picks Julia
+   * itself: BLAB_JULIA_EXE env, then its known install path, then `julia` on
+   * PATH — hardcoding a machine-specific default here would defeat that.
+   */
+  juliaExecutable: process.env.BLAB_JULIA_EXECUTABLE ?? null,
 };
 
 export const t3Configured = () => config.t3BaseUrl !== null && config.t3Token !== null;
