@@ -9,7 +9,7 @@ from types import ModuleType
 import meshio
 import numpy as np
 
-GENERATOR_MODULES = ("ath_waveguide", "axisym_horn")
+GENERATOR_MODULES = ("ath_waveguide", "axisym_horn", "slot_cd_horn")
 
 
 def load_generators() -> dict[str, ModuleType]:
