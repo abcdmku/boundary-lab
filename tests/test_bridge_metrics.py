@@ -254,12 +254,12 @@ def test_log_curvature_rms_needs_three_points():
         metrics.log_curvature_rms_db(np.asarray([1000.0, 2000.0]), np.asarray([0.0, 1.0]))
 
 
-def test_di_needs_three_freqs(tmp_path):
+def test_fewer_than_three_in_band_freqs_rejected(tmp_path):
+    # DI smoothness and ripple are unmeasurable below 3 points; scoring anyway
+    # would award unmeasured subscores, so compute_metrics must refuse.
     npz = write_npz(tmp_path, [1000.0, 2000.0], np.vstack([tent(90.0)] * 2))
-    result = metrics.compute_metrics(npz, make_spec())
-    di = result["di_smoothness"]
-    assert di["spdi_rms_d2_db"] is None
-    assert di["subscore"] == 1.0
+    with pytest.raises(ValueError, match="at least 3"):
+        metrics.compute_metrics(npz, make_spec())
 
 
 # --- compute_metrics: on-axis ripple --------------------------------------
@@ -295,11 +295,11 @@ def test_ripple_orthogonal_residual_measured_exactly(tmp_path):
     assert ripple["subscore"] == pytest.approx(1.0 / (1.0 + d**2), rel=1e-3)
 
 
-def test_ripple_needs_three_freqs(tmp_path):
-    npz = write_npz(tmp_path, [1000.0, 2000.0], np.vstack([tent(90.0)] * 2))
-    ripple = metrics.compute_metrics(npz, make_spec())["on_axis_ripple"]
-    assert ripple["rms_db"] is None
-    assert ripple["subscore"] == 1.0
+def test_zero_tolerance_rejected(tmp_path):
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], np.vstack([tent(90.0)] * 3))
+    spec = make_spec(horizontal_target_deg=90.0, tolerance_deg=0.0)
+    with pytest.raises(ValueError, match="tolerance_deg"):
+        metrics.compute_metrics(npz, spec)
 
 
 # --- compute_metrics: size ------------------------------------------------
@@ -326,6 +326,20 @@ def test_size_ten_percent_over_one_axis(tmp_path):
     size = metrics.compute_metrics(npz, spec, mesh_result=mesh_result)["size"]
     assert size["penalty"] == pytest.approx(0.1)
     assert size["subscore"] == pytest.approx(1.0 / 1.1)
+
+
+def test_zero_size_limit_rejected(tmp_path):
+    npz = _simple_npz(tmp_path)
+    mesh_result = {"bbox_mm": [100.0, 100.0, 100.0], "triangles": 5000}
+    spec = make_spec(size_limit_mm={"width": 0.0})
+    with pytest.raises(ValueError, match="size_limit_mm"):
+        metrics.compute_metrics(npz, spec, mesh_result=mesh_result)
+
+
+def test_negative_size_limit_rejected_even_without_mesh(tmp_path):
+    npz = _simple_npz(tmp_path)
+    with pytest.raises(ValueError, match="size_limit_mm"):
+        metrics.compute_metrics(npz, make_spec(size_limit_mm={"depth": -5.0}))
 
 
 def test_size_without_limits_or_mesh_is_permissive(tmp_path):

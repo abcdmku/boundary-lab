@@ -117,10 +117,20 @@ def compute_metrics(
             f"No solved frequencies inside band_hz [{band_lo:g}, {band_hi:g}]; "
             f"solve covers {freq_hz.min():g}-{freq_hz.max():g} Hz."
         )
+    if int(band_mask.sum()) < 3:
+        # DI smoothness and ripple cannot be measured from fewer than 3 points;
+        # scoring anyway would award unmeasured subscores. Fail loudly instead.
+        raise ValueError(
+            f"Only {int(band_mask.sum())} solved frequencies inside band_hz "
+            f"[{band_lo:g}, {band_hi:g}]; at least 3 are required to score "
+            "DI smoothness and on-axis ripple. Solve with a higher --count."
+        )
     band_freqs = freq_hz[band_mask]
 
     coverage_spec = objective.get("coverage") or {}
     tolerance_deg = float(coverage_spec.get("tolerance_deg", DEFAULT_TOLERANCE_DEG))
+    if not math.isfinite(tolerance_deg) or tolerance_deg <= 0:
+        raise ValueError(f"objective.coverage.tolerance_deg must be a finite, positive number (got {tolerance_deg!r}).")
     coverage = {
         "horizontal": _coverage_axis(
             band_freqs,
@@ -243,41 +253,33 @@ def _di_smoothness(
     curves = compute_spinorama_from_planes(freq_hz, polar_angle_deg, horizontal_spl_db, vertical_spl_db)
     spdi = np.asarray(curves.sound_power_di_db, dtype=float)[band_mask]
     erdi = np.asarray(curves.early_reflections_di_db, dtype=float)[band_mask]
-    result = {
-        "spdi_rms_d2_db": None,
-        "erdi_rms_d2_db": None,
-        "reference_points_per_decade": REFERENCE_POINTS_PER_DECADE,
-        "subscore": 1.0,
-        "freq_hz": freq_hz[band_mask],
-        "spdi_db": spdi,
-        "erdi_db": erdi,
-    }
-    if spdi.size < 3:
-        return result
     band_freqs = freq_hz[band_mask]
     spdi_rms = log_curvature_rms_db(band_freqs, spdi)
     erdi_rms = log_curvature_rms_db(band_freqs, erdi)
     combined = math.sqrt((spdi_rms**2 + erdi_rms**2) / 2.0)
-    result["spdi_rms_d2_db"] = spdi_rms
-    result["erdi_rms_d2_db"] = erdi_rms
-    result["subscore"] = _subscore(combined, DI_SMOOTHNESS_SCALE_DB)
-    return result
+    return {
+        "spdi_rms_d2_db": spdi_rms,
+        "erdi_rms_d2_db": erdi_rms,
+        "reference_points_per_decade": REFERENCE_POINTS_PER_DECADE,
+        "subscore": _subscore(combined, DI_SMOOTHNESS_SCALE_DB),
+        "freq_hz": band_freqs,
+        "spdi_db": spdi,
+        "erdi_db": erdi,
+    }
 
 
 def _on_axis_ripple(band_freqs: np.ndarray, polar_angle_deg: np.ndarray, horizontal_band: np.ndarray) -> dict:
     on_axis_col = int(np.argmin(np.abs(np.asarray(polar_angle_deg, dtype=float))))
     on_axis = horizontal_band[:, on_axis_col]
-    result = {"peak_to_peak_db": None, "rms_db": None, "subscore": 1.0}
-    if on_axis.size < 3:
-        return result
     log_f = np.log10(band_freqs)
     slope, intercept = np.polyfit(log_f, on_axis, 1)
     residual = on_axis - (slope * log_f + intercept)
     rms = float(np.sqrt(np.mean(residual**2)))
-    result["peak_to_peak_db"] = float(residual.max() - residual.min())
-    result["rms_db"] = rms
-    result["subscore"] = _subscore(rms, RIPPLE_SCALE_DB)
-    return result
+    return {
+        "peak_to_peak_db": float(residual.max() - residual.min()),
+        "rms_db": rms,
+        "subscore": _subscore(rms, RIPPLE_SCALE_DB),
+    }
 
 
 def _size_penalty(size_limit_mm: dict | None, mesh_result: dict | None) -> dict:
@@ -290,14 +292,17 @@ def _size_penalty(size_limit_mm: dict | None, mesh_result: dict | None) -> dict:
             "depth_mm": float(bbox[2]),
         }
     penalty = 0.0
-    if size_limit_mm and dimensions is not None:
+    if size_limit_mm:
         for key in ("width", "height", "depth"):
             limit = size_limit_mm.get(key)
             if limit is None:
                 continue
             limit = float(limit)
-            dim = dimensions[f"{key}_mm"]
-            penalty += max(0.0, (dim - limit) / limit)
+            if not math.isfinite(limit) or limit <= 0:
+                raise ValueError(f"objective.size_limit_mm.{key} must be a finite, positive number (got {limit!r}).")
+            if dimensions is None:
+                continue
+            penalty += max(0.0, (dimensions[f"{key}_mm"] - limit) / limit)
     return {"penalty": penalty, "subscore": float(1.0 / (1.0 + penalty)), "dimensions": dimensions}
 
 
