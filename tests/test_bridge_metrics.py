@@ -328,6 +328,23 @@ def test_size_ten_percent_over_one_axis(tmp_path):
     assert size["subscore"] == pytest.approx(1.0 / 1.1)
 
 
+def test_nan_or_negative_coverage_target_rejected(tmp_path):
+    npz = _simple_npz(tmp_path)
+    with pytest.raises(ValueError, match="horizontal_target_deg"):
+        metrics.compute_metrics(npz, make_spec(horizontal_target_deg=float("nan")))
+    with pytest.raises(ValueError, match="vertical_target_deg"):
+        metrics.compute_metrics(npz, make_spec(vertical_target_deg=-45.0))
+
+
+def test_size_limits_without_bbox_rejected(tmp_path):
+    # Limits configured but mesh-result discovery failed: a perfect size
+    # subscore must not be awarded just because the dimensions are unknown.
+    npz = _simple_npz(tmp_path)
+    spec = make_spec(size_limit_mm={"width": 300.0})
+    with pytest.raises(ValueError, match="bounding box is unavailable"):
+        metrics.compute_metrics(npz, spec, mesh_result=None)
+
+
 def test_zero_size_limit_rejected(tmp_path):
     npz = _simple_npz(tmp_path)
     mesh_result = {"bbox_mm": [100.0, 100.0, 100.0], "triangles": 5000}

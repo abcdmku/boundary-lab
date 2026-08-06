@@ -131,6 +131,10 @@ def compute_metrics(
     tolerance_deg = float(coverage_spec.get("tolerance_deg", DEFAULT_TOLERANCE_DEG))
     if not math.isfinite(tolerance_deg) or tolerance_deg <= 0:
         raise ValueError(f"objective.coverage.tolerance_deg must be a finite, positive number (got {tolerance_deg!r}).")
+    for target_key in ("horizontal_target_deg", "vertical_target_deg"):
+        target = coverage_spec.get(target_key)
+        if target is not None and (not math.isfinite(float(target)) or float(target) <= 0):
+            raise ValueError(f"objective.coverage.{target_key} must be a finite, positive beamwidth (got {target!r}).")
     coverage = {
         "horizontal": _coverage_axis(
             band_freqs,
@@ -293,6 +297,7 @@ def _size_penalty(size_limit_mm: dict | None, mesh_result: dict | None) -> dict:
         }
     penalty = 0.0
     if size_limit_mm:
+        limits = {}
         for key in ("width", "height", "depth"):
             limit = size_limit_mm.get(key)
             if limit is None:
@@ -300,8 +305,14 @@ def _size_penalty(size_limit_mm: dict | None, mesh_result: dict | None) -> dict:
             limit = float(limit)
             if not math.isfinite(limit) or limit <= 0:
                 raise ValueError(f"objective.size_limit_mm.{key} must be a finite, positive number (got {limit!r}).")
-            if dimensions is None:
-                continue
+            limits[key] = limit
+        if limits and dimensions is None:
+            # Never award a perfect size subscore just because the bbox is unknown.
+            raise ValueError(
+                "objective.size_limit_mm is set but the mesh bounding box is unavailable; "
+                "pass --mesh-run or ensure the mesh run's result.json is discoverable from the solve config."
+            )
+        for key, limit in limits.items():
             penalty += max(0.0, (dimensions[f"{key}_mm"] - limit) / limit)
     return {"penalty": penalty, "subscore": float(1.0 / (1.0 + penalty)), "dimensions": dimensions}
 
