@@ -34,6 +34,9 @@ SCHEMA_VERSION = 2
 
 DEFAULT_TOLERANCE_DEG = 10.0
 DI_SMOOTHNESS_SCALE_DB = 2.0
+# DI curvature is rescaled to this fixed log-frequency grid density so scores
+# stay comparable across solves with different --count (see log_curvature_rms_db).
+REFERENCE_POINTS_PER_DECADE = 32
 RIPPLE_SCALE_DB = 1.0
 DEFAULT_WEIGHTS = {
     "coverage": 0.4,
@@ -196,13 +199,38 @@ def _coverage_axis(
         # deviation is unmeasurable, treat as total coverage failure (not a free pass).
         axis["subscore"] = 0.0
         return axis
+    # Frequencies whose -6 dB width never resolved are coverage failures, not
+    # ignorable gaps: mean/rms describe the resolved subset, but the tolerance
+    # fraction counts every in-band frequency and the subscore is scaled by the
+    # resolved fraction so unresolved lobes always cost score.
+    valid_fraction = float(finite.sum()) / float(beamwidths.size)
     dev = beamwidths[finite] - float(target_deg)
     rms_dev = float(np.sqrt(np.mean(dev**2)))
     axis["mean_dev_deg"] = float(np.mean(dev))
     axis["rms_dev_deg"] = rms_dev
-    axis["within_tolerance_fraction"] = float(np.mean(np.abs(dev) <= tolerance_deg))
-    axis["subscore"] = _subscore(rms_dev, tolerance_deg)
+    axis["within_tolerance_fraction"] = float(np.sum(np.abs(dev) <= tolerance_deg)) / float(beamwidths.size)
+    axis["subscore"] = valid_fraction * _subscore(rms_dev, tolerance_deg)
     return axis
+
+
+def log_curvature_rms_db(freq_hz: np.ndarray, curve_db: np.ndarray) -> float:
+    """RMS curvature of a curve vs log10(frequency), at a reference grid spacing.
+
+    The second derivative is estimated with non-uniform finite differences in
+    log10(f) and rescaled to a fixed reference spacing of
+    ``1 / REFERENCE_POINTS_PER_DECADE`` decades, so the result is expressed as a
+    per-step second difference in dB and — for smooth curves — is independent of
+    how densely the solve sampled the band. Requires at least 3 points.
+    """
+    x = np.log10(np.asarray(freq_hz, dtype=float))
+    y = np.asarray(curve_db, dtype=float)
+    if x.size < 3:
+        raise ValueError("log_curvature_rms_db needs at least 3 frequency points.")
+    h1 = x[1:-1] - x[:-2]
+    h2 = x[2:] - x[1:-1]
+    second_derivative = 2.0 * (h2 * y[:-2] - (h1 + h2) * y[1:-1] + h1 * y[2:]) / (h1 * h2 * (h1 + h2))
+    step_ref = 1.0 / REFERENCE_POINTS_PER_DECADE
+    return float(np.sqrt(np.mean((second_derivative * step_ref**2) ** 2)))
 
 
 def _di_smoothness(
@@ -218,6 +246,7 @@ def _di_smoothness(
     result = {
         "spdi_rms_d2_db": None,
         "erdi_rms_d2_db": None,
+        "reference_points_per_decade": REFERENCE_POINTS_PER_DECADE,
         "subscore": 1.0,
         "freq_hz": freq_hz[band_mask],
         "spdi_db": spdi,
@@ -225,8 +254,9 @@ def _di_smoothness(
     }
     if spdi.size < 3:
         return result
-    spdi_rms = float(np.sqrt(np.mean(np.diff(spdi, n=2) ** 2)))
-    erdi_rms = float(np.sqrt(np.mean(np.diff(erdi, n=2) ** 2)))
+    band_freqs = freq_hz[band_mask]
+    spdi_rms = log_curvature_rms_db(band_freqs, spdi)
+    erdi_rms = log_curvature_rms_db(band_freqs, erdi)
     combined = math.sqrt((spdi_rms**2 + erdi_rms**2) / 2.0)
     result["spdi_rms_d2_db"] = spdi_rms
     result["erdi_rms_d2_db"] = erdi_rms
@@ -276,6 +306,9 @@ def _normalized_weights(spec_weights: dict | None) -> dict:
     for name, value in (spec_weights or {}).items():
         if name in merged:
             merged[name] = float(value)
+    for name, value in merged.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"objective.weights.{name} must be a finite, nonnegative number (got {value!r}).")
     total = sum(merged.values())
     if total <= 0:
         raise ValueError("objective.weights must sum to a positive value.")

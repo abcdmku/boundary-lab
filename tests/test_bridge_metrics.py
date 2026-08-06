@@ -37,6 +37,7 @@ def write_npz(
     v_norm = h_norm if v_norm is None else np.asarray(v_norm, dtype=np.float32)
     h_raw = h_norm + 90.0 if h_raw is None else np.asarray(h_raw, dtype=np.float32)
     v_raw = v_norm + 90.0 if v_raw is None else np.asarray(v_raw, dtype=np.float32)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "pressure_data_raw.npz"
     np.savez_compressed(
         path,
@@ -176,6 +177,19 @@ def test_coverage_target_with_no_valid_beamwidth_fails(tmp_path):
     assert all(width is None for width in horizontal["beamwidth_deg"])
 
 
+def test_coverage_partially_unresolved_beamwidths_cost_score(tmp_path):
+    # One of three in-band frequencies never crosses -6 dB: stats cover the
+    # resolved subset, but the subscore is scaled by the resolved fraction and
+    # within_tolerance_fraction counts all in-band frequencies.
+    h_norm = np.vstack([tent(90.0), tent(90.0), np.zeros(ANGLES.size)])
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], h_norm)
+    horizontal = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0))["coverage"]["horizontal"]
+    assert horizontal["n_valid"] == 2
+    assert horizontal["rms_dev_deg"] == pytest.approx(0.0, abs=1e-3)
+    assert horizontal["within_tolerance_fraction"] == pytest.approx(2.0 / 3.0)
+    assert horizontal["subscore"] == pytest.approx(2.0 / 3.0, rel=1e-4)
+
+
 def test_beamwidth_arrays_match_in_band_freqs(tmp_path):
     freqs = [500.0, 1000.0, 2000.0, 4000.0, 8000.0]
     npz = write_npz(tmp_path, freqs, np.vstack([tent(90.0)] * 5))
@@ -211,12 +225,33 @@ def test_flat_di_scores_one(tmp_path):
 
 def test_alternating_directivity_lowers_di_subscore(tmp_path):
     freqs = [1000.0, 2000.0, 4000.0, 8000.0]
-    h_norm = np.vstack([tent(60.0 if i % 2 else 120.0) for i in range(4)])
-    npz = write_npz(tmp_path, freqs, h_norm)
-    result = metrics.compute_metrics(npz, make_spec())
-    di = result["di_smoothness"]
-    assert di["spdi_rms_d2_db"] > 1.0
-    assert di["subscore"] < 0.8
+    smooth = np.vstack([tent(w) for w in (120.0, 100.0, 80.0, 60.0)])
+    zigzag = np.vstack([tent(60.0 if i % 2 else 120.0) for i in range(4)])
+    smooth_di = metrics.compute_metrics(write_npz(tmp_path / "a", freqs, smooth), make_spec())["di_smoothness"]
+    zigzag_di = metrics.compute_metrics(write_npz(tmp_path / "b", freqs, zigzag), make_spec())["di_smoothness"]
+    assert zigzag_di["spdi_rms_d2_db"] > 2.0 * smooth_di["spdi_rms_d2_db"]
+    assert zigzag_di["subscore"] < smooth_di["subscore"]
+
+
+def test_log_curvature_rms_is_grid_density_invariant():
+    # Quadratic in log10(f) has constant curvature; the non-uniform second
+    # derivative recovers it exactly, so density must not change the result.
+    curvature = 6.0  # dB / decade^2
+
+    def sample(n):
+        freqs = np.logspace(3.0, 4.0, n)
+        y = 0.5 * curvature * (np.log10(freqs) - 3.0) ** 2
+        return metrics.log_curvature_rms_db(freqs, y)
+
+    expected = curvature / metrics.REFERENCE_POINTS_PER_DECADE**2
+    assert sample(4) == pytest.approx(expected, rel=1e-9)
+    assert sample(9) == pytest.approx(expected, rel=1e-9)
+    assert sample(33) == pytest.approx(expected, rel=1e-9)
+
+
+def test_log_curvature_rms_needs_three_points():
+    with pytest.raises(ValueError, match="3"):
+        metrics.log_curvature_rms_db(np.asarray([1000.0, 2000.0]), np.asarray([0.0, 1.0]))
 
 
 def test_di_needs_three_freqs(tmp_path):
@@ -326,6 +361,19 @@ def test_single_weight_selects_subscore(tmp_path):
     )
     result = metrics.compute_metrics(npz, spec)
     assert result["score"] == pytest.approx(result["subscores"]["coverage"], rel=1e-9)
+
+
+def test_negative_weight_rejected(tmp_path):
+    npz = _simple_npz(tmp_path)
+    spec = make_spec(weights={"coverage": -0.5, "di_smoothness": 2.0})
+    with pytest.raises(ValueError, match="nonnegative"):
+        metrics.compute_metrics(npz, spec)
+
+
+def test_non_finite_weight_rejected(tmp_path):
+    npz = _simple_npz(tmp_path)
+    with pytest.raises(ValueError, match="finite"):
+        metrics.compute_metrics(npz, make_spec(weights={"coverage": float("nan")}))
 
 
 def test_unknown_weight_keys_ignored(tmp_path):
