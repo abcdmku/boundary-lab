@@ -610,6 +610,7 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
         "mesh_path": str(raw_msh),
         "cleaned_msh_path": str(cleaned_msh),
         "reduced_msh_path": str(reduced_msh),
+        "mirror_axes": ["x", "y"],  # the quadrant is mirrored across x and y -> symmetry="xy" only
         "stl_path": None,
         "triangles": triangle_count,
         "estimated_triangles": estimate,
