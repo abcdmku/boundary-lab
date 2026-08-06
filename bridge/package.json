@@ -1,0 +1,28 @@
+{
+  "name": "boundary-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "T3 Code surface bridge for Boundary Lab: web UI + MCP tools + t3 orchestration client over the BEM acoustics solver. Agents and humans drive mesh generation and solves through one bridge process.",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "postinstall": "cd ui && npm install",
+    "prestart": "cd ui && npm run build",
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "express": "^4.21.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -42,8 +42,11 @@ results/
 #gmsh examples
 gmsh/gmsh-4.15.2-Windows64/examples/
 
-# Generated BEM solver outputs and run directories
-runs/
+# Generated BEM solver outputs and run directories (root only — an unanchored
+# runs/ also swallowed bridge/ui/src/components/runs/). Campaign specs/logs
+# under runs/campaigns/ are text and belong in git.
+/runs/*
+!/runs/campaigns/
 references/
 pressure_data*.npz
 pressure_data_formatted.npz
