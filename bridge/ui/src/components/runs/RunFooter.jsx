@@ -1,0 +1,38 @@
+// Quiet footer: at most three small download links — mesh (the *_clean.msh,
+// or first .msh), config, log — plus the error text for failed runs.
+// Nothing else; the full artifact list is the AI's business over MCP.
+export function RunFooter({ run }) {
+  const arts = run.artifacts || [];
+  const nameOf = (a) => (a.name || "").toLowerCase();
+  const mesh =
+    arts.find((a) => nameOf(a).endsWith("_clean.msh")) ||
+    arts.find((a) => nameOf(a).endsWith(".msh"));
+  const config = arts.find((a) => a.kind === "config");
+  const log = arts.find((a) => a.kind === "log");
+  const links = [
+    mesh && { label: "mesh", ...mesh },
+    config && { label: "config", ...config },
+    log && { label: "log", ...log },
+  ].filter(Boolean);
+
+  const showError = run.status === "failed" && run.error;
+  if (!links.length && !showError) return null;
+
+  return (
+    <div className="run-footer">
+      {links.length > 0 && (
+        <div>
+          {links.map((a, i) => (
+            <span key={a.url}>
+              {i > 0 && <span className="run-footer-sep">·</span>}
+              <a href={a.url} target="_blank" rel="noreferrer" title={a.name}>
+                {a.label}
+              </a>
+            </span>
+          ))}
+        </div>
+      )}
+      {showError && <div className="run-footer-error">{run.error}</div>}
+    </div>
+  );
+}
