@@ -13,7 +13,7 @@ procedure, and the trials.jsonl line schema. Harness notes:
 - Poll with `sleep 30` (Bash) between `get_run` calls. As a subagent you get NO
   automatic wake-up when the solve finishes — the playbook's ~30 s polling rule is
   mandatory; do not tighten it.
-- Append to `trials.jsonl` as a careful single-line write (append-only; never rewrite the
-  file; keep the JSON object on one line).
+- Append to `trials.jsonl` via a Bash `>>` redirect of the single JSON line (Write
+  rewrites whole files — never use it on `trials.jsonl` once the file exists).
 - Your final message is the ≤10-line report from step (e) — scalars, run ids, and URLs
   only; never arrays.

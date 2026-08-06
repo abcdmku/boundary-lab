@@ -23,12 +23,18 @@ and never runs solves itself.
 - **All state lives on disk** under `runs/campaigns/<name>/` (layout below). Every loop
   step re-reads the files it needs — never rely on conversation memory. This makes the
   loop work identically whether the roles run inline in a single agent or as separate
-  subagents that forget everything between invocations.
+  workers that forget everything between invocations.
 - **Iteration meshes stay ≤ ~9k triangles** (see `spec.json` → `mesh.max_triangles`).
   Fine settings are reserved for the single final verification trial.
 - Tools you refer to generically: the boundary-lab MCP tools (`list_generators`,
   `generate`, `solve`, `get_run`, `list_runs`), shell commands, and plain file
   reads/writes. Pass your absolute working directory as `workspace` on every MCP call.
+- **"Repository root"** throughout means the checkout that hosts the running bridge
+  (`bridge/data/` lives there). Campaign paths and score commands resolve against it,
+  and it is the path to pass as `workspace`.
+- If the MCP tools are unreachable, ask the user to start the bridge (`npm start` in
+  `bridge/`). Do not restart a bridge yourself mid-campaign — it may be serving other
+  work.
 
 ## LOCK protocol
 
@@ -40,26 +46,32 @@ Exactly one orchestrator may drive a campaign directory at a time.
      queued/running solves) before deleting a stale LOCK by hand. If the timestamp is
      less than ~2 hours old, assume the campaign is live. Never delete another run's
      LOCK yourself.
-   - If it does not exist: create it. Contents: one line, `<harness name> <ISO-8601
-     timestamp>`, e.g. `claude-code 2026-08-06T14:00:00Z`.
-2. Rewrite the LOCK with a fresh timestamp at the start of every trial, so its age
-   reflects liveness.
+   - If it does not exist: create it (creating the campaign directory first if needed).
+     Contents: one line, `<harness name> <ISO-8601 UTC timestamp>` — harness name is any
+     short stable identifier for your runtime (e.g. `claude-code`, `cursor`, `manual`);
+     get the timestamp from a shell clock (e.g. `date -u +%FT%TZ`).
+2. Rewrite the LOCK with a fresh timestamp at the start of every trial — including the
+   verification trial, which can be the longest — so its age reflects liveness.
 3. Remove the LOCK when the loop ends — on normal finalization, on STOP, and on any
-   error path where you abandon the campaign. If you crash without removing it, the
-   freshness check above lets the next orchestrator (and the user) reason about it.
+   error path where you abandon the campaign. On an error path, first note any in-flight
+   solve run id in `log.md` so the next orchestrator does not start a trial against an
+   occupied GPU. If you crash without removing the LOCK, the freshness check above lets
+   the next orchestrator (and the user) reason about it.
 
 ## Start or resume
 
 Campaign state lives in `runs/campaigns/<name>/` relative to the repository root.
 
-**Resume** — if the directory already exists (after the LOCK check):
+**Resume** — if `spec.json` exists (after the LOCK check; the directory alone proves
+nothing, since creating the LOCK creates it):
 
-1. Read `spec.json` (frozen; never edit it mid-campaign) and all of `trials.jsonl`.
+1. Read `spec.json` (frozen; never edit it mid-campaign) and all of `trials.jsonl`
+   (absent or empty means no trials have completed yet — that is a valid resume state).
 2. Report position to the user: trials completed, current best score and its trial
    number, remaining budget.
 3. Continue the loop from the next trial number.
 
-**Start** — if the directory does not exist:
+**Start** — if `spec.json` does not exist:
 
 1. Interview the user for whatever is missing:
    - target coverage (horizontal × vertical, degrees),
@@ -67,34 +79,53 @@ Campaign state lives in `runs/campaigns/<name>/` relative to the repository root
    - size limits (mouth width/height, depth, mm),
    - iteration budget (max trials) and any target score,
    - anything fixed (throat diameter, driver, mounting constraints).
+   For anything the user has no opinion on, use the defaults from the worked example
+   below. If you cannot ask (non-interactive), use those defaults and record every
+   assumption in `log.md`.
 2. Call `list_generators` and confirm which generator to use (e.g. `slot_cd_horn`) and
-   that its parameter schema covers the degrees of freedom the user wants. Do not
-   hardcode parameter names from this playbook — the schema fetched at runtime is the
-   source of truth.
-3. Create `runs/campaigns/<name>/`, write `spec.json` (schema below), and seed `log.md`
-   with a header summarizing the spec.
+   that its parameter schema covers the degrees of freedom the user wants. If no
+   generator fits, stop and tell the user — do not improvise geometry through the wrong
+   generator. Do not hardcode parameter names from this playbook — the schema fetched at
+   runtime is the source of truth.
+3. Write `spec.json` (schema below) and seed `log.md` with a header summarizing the
+   spec. `trials.jsonl` and `best.json` are NOT pre-created: the trial-runner creates
+   `trials.jsonl` on the first trial, and you create `best.json` at the first successful
+   trial (with no prior success, any `status: "ok"` trial becomes the best).
 
 ## The loop
 
-For each trial while no stopping criterion fires:
+For each trial:
 
 1. Refresh the LOCK timestamp.
-2. **Designer**: invoke the designer role (playbook `designer.md`) with only the campaign
-   name/path. It re-reads spec + history itself and returns either exactly one params
-   JSON object or `STOP` with a reason. It appends its hypothesis to `log.md` before
-   returning.
-3. If the designer returned `STOP` → go to Finalization.
-4. Determine the stage: `"screen"` for the first `budget.screen_trials` trials (default
-   4), `"refine"` afterwards. (`"verify"` is used only by Finalization.)
+2. **Designer**: invoke the designer role (playbook `designer.md`) with the campaign
+   path (give it the absolute repository root too). It re-reads spec + history itself
+   and returns either exactly one params JSON object or a message starting with `STOP`.
+   It appends its hypothesis to `log.md` before returning.
+3. If the designer returned `STOP` (first word of its reply):
+   - reason starting with `blocked:` → abort: report the blocker to the user, remove the
+     LOCK, and stop (no finalization);
+   - any other reason → go to Finalization.
+4. Determine the stage: `"screen"` until `budget.screen_trials` (default 4) trials with
+   `status: "ok"` exist in `trials.jsonl`, `"refine"` afterwards. (`"verify"` is used
+   only by Finalization.) This matches the designer's own screening rule, so the stage
+   label always agrees with the strategy that produced the proposal.
 5. **Trial-runner**: invoke the trial-runner role (playbook `trial-runner.md`) with the
-   campaign name, trial number, stage, and the params JSON. It runs generate → solve →
-   score, appends exactly one line to `trials.jsonl`, and returns a ≤10-line report.
-6. Re-read the last line of `trials.jsonl` (trust the file, not the report). Append a
-   one-line outcome to `log.md`, e.g.
+   campaign name, trial number (last recorded trial + 1, or 1), stage, and the params
+   JSON. The trial-runner stays alive for the whole trial — polling the solve per its
+   playbook — and returns only after it has appended its `trials.jsonl` line. Wait for
+   it; never start anything else meanwhile.
+6. Re-read the last line of `trials.jsonl` (trust the file, not the report). If no line
+   for this trial appeared (runner crashed): check `list_runs`/`get_run` for a solve
+   still queued or running for this trial — if one exists, keep waiting (poll with ~30 s
+   sleeps) until it is terminal; do NOT start another trial. Once nothing is in flight,
+   append the missing line yourself with `status: "failed"`, `score: null`, and a note
+   `trial-runner crashed` (this is the one sanctioned exception to the trial-runner
+   being the sole writer).
+7. Append a one-line outcome to `log.md`, e.g.
    `Trial 7 (refine): score 0.842 (best 0.851 @ t5) — ok`.
-7. If the trial improved on the best score so far, update `best.json` (with
+8. If the trial improved on the best score so far, rewrite `best.json` (with
    `"verified": false`).
-8. Repeat.
+9. Check the stopping criteria (below). If any fires → Finalization. Else repeat from 1.
 
 Failures (`status: "failed"`, `score: null`) count against `max_trials` and are valuable
 data — the designer treats them as infeasible-region information. Do not retry a failed
@@ -103,28 +134,38 @@ exception, and it happens inside the trial-runner).
 
 ## Stopping criteria
 
-All read from `spec.json` → `budget`; check after every trial:
+All read from `spec.json` → `budget`; check after every recorded trial:
 
-- `max_trials` trials recorded in `trials.jsonl` (including failures).
-- No improvement greater than `min_gain` in best score over the last `patience` trials.
+- `max_trials` trials recorded in `trials.jsonl` (including failures; the verification
+  trial is extra and does not count against this budget).
+- No improvement: once at least `patience` trials exist, stop when the best score now
+  exceeds the best score as of `patience` trials ago by less than `min_gain` (failed
+  trials count as non-improvements).
 - `target_score` reached (skip this check when `target_score` is null).
 
-The designer may also STOP earlier with its own reasoning (e.g. converged, or the spec is
-infeasible in the allowed size).
+The designer may also STOP earlier with its own qualitative reasoning (e.g. the spec is
+infeasible in the allowed size); the numeric checks above are yours alone — the designer
+does not duplicate them.
 
 ## Finalization
 
-1. Read `best.json` for the champion params.
-2. Run one **verification trial** through the trial-runner with stage `"verify"` and the
-   champion's exact generator params. The trial-runner uses `spec.solve_verify` solve
-   settings for verify trials (finer than `spec.solve`: wider band and/or more frequency
-   points). If the spec defines finer *mesh* settings for verification
-   (`mesh.verify_max_triangles`), the iteration triangle cap is relaxed to that value for
-   this one trial only.
+1. Read `best.json` for the champion params. If there is no `best.json` (no trial ever
+   succeeded), skip verification: write a closing `log.md` summary saying the campaign
+   produced no feasible design (and why, from the failure notes), remove the LOCK, and
+   report to the user.
+2. Run one **verification trial** through the trial-runner with stage `"verify"`, the
+   next trial number, and the champion's exact generator params. The trial-runner uses
+   `spec.solve_verify` solve settings for verify trials (finer than `spec.solve`: wider
+   band and/or more frequency points), the relaxed `mesh.verify_max_triangles` cap if the
+   spec defines one, and the longer `solve_verify_timeout_min` — fine meshes can take an
+   hour or more on this GPU.
 3. Update `best.json`: set `"verified": true` only if the verify score confirms the
-   champion (verify score ≥ best score − 2 × `min_gain`). If it does not confirm, leave
-   `"verified": false` and record the discrepancy in `log.md` — the coarse settings were
-   flattering the design, and the user should know.
+   champion (verify score ≥ best score − 2 × `min_gain`). This is a deliberate
+   cross-fidelity comparison — its whole purpose is to detect coarse-settings flattery,
+   so the designer's cross-fidelity ban does not apply to it; the `2 × min_gain`
+   tolerance absorbs the fidelity gap. If the verify trial fails (`score: null`) or does
+   not confirm, leave `"verified": false` and record the discrepancy in `log.md` — the
+   user should know the iteration-fidelity score was not reproduced.
 4. Append a closing summary to `log.md`: trials used, best trial, final params, score and
    subscores, and the plot/preview URLs from the verify run's `get_run` artifacts (URLs
    only — never paste data arrays).
@@ -162,26 +203,39 @@ runs/campaigns/cd90x60/
   "solve": { "fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_verify": { "fmin": 500, "fmax": 20000, "count": 48, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_timeout_min": 20,
+  "solve_verify_timeout_min": 90,
   "budget": { "max_trials": 30, "screen_trials": 4, "min_gain": 0.01, "patience": 6, "target_score": null }
 }
 ```
 
-Notes: `weights` keys must match the subscore names produced by the scorer
-(`python bridge/py/blabctl.py score`); `fixed_params` are merged into every trial's
-generator params and the designer must not vary them; `solve`/`solve_verify` fields map
-directly onto the `solve` MCP tool's arguments.
+Notes:
+
+- The scorer (`python bridge/py/blabctl.py score`) produces a scalar `score` normalized
+  to 0–1 (higher is better) and the subscores `h_bw`, `v_bw`, `smoothness`, `ripple`;
+  `weights` keys must use those names (copying them from this example is correct — it is
+  the scorer contract, unlike generator params, which must come from `list_generators`).
+- `fixed_params` are merged into every proposal **by the designer** and must not be
+  varied; the trial-runner passes the designer's params through verbatim.
+- `solve`/`solve_verify` fields map directly onto the `solve` MCP tool's arguments.
+  `symmetry` is one of `off` / `x` / `xy`; anything but `off` requires the generator to
+  emit a reduced (unmirrored) mesh — if the first trial fails with a symmetry/mesh
+  error, re-create the spec with `"symmetry": "off"`.
+- `solve_timeout_min` (and `solve_verify_timeout_min` for verify trials, default
+  3 × `solve_timeout_min`) is enforced by the trial-runner, which cancels a timed-out
+  run through the bridge HTTP API.
 
 ### `trials.jsonl` — schema and example lines
 
 One compact JSON object per line, appended by the trial-runner only (single writer,
-strictly sequential — one trial in flight guarantees no interleaving). Fields:
+strictly sequential — one trial in flight guarantees no interleaving; the sole exception
+is the orchestrator's crashed-runner failure line, loop step 6). Fields:
 
 ```
 trial          integer, 1-based, strictly increasing
 ts             ISO-8601 UTC timestamp when the line was written
 stage          "screen" | "refine" | "verify"
 params         full generator params object as passed to generate
-mesh_run_id    bridge run id of the generate run (null if generate itself failed)
+mesh_run_id    bridge run id of the generate run (null only if no run id was returned)
 solve_run_id   bridge run id of the solve run (null if the solve was never started)
 triangles      triangle count from generate (null if unavailable)
 solve_settings the solve settings used, copied from spec (null if no solve started)
@@ -209,12 +263,16 @@ Failures always carry `score: null` — never `0`, which would poison score stat
 
 ### `log.md` conventions
 
-Append-only narrative for humans (and for the designer's hypotheses):
+Append-only narrative for humans (and the designer's persisted strategy memory):
 
 - Seeded by the orchestrator with a header summarizing the spec.
-- The designer appends `## Trial N proposal` with its hypothesis before each trial.
+- The designer appends `## Trial N proposal` with its hypothesis before each trial (or a
+  `## STOP` section with its rationale when it stops the campaign).
 - The orchestrator appends a one-line outcome after each trial.
 - Ends with the finalization summary (plot URLs, never data arrays).
+
+Writers alternate strictly (designer → orchestrator, one trial at a time), so plain
+appends are safe.
 
 ### `best.json` — example
 
@@ -222,6 +280,8 @@ Append-only narrative for humans (and for the designer's hypotheses):
 {"trial": 7, "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "mesh_run_id": "r_a1b2c3", "solve_run_id": "r_d4e5f6", "verified": false}
 ```
 
+`trial` stays the champion's iteration trial number; verification only flips `verified`.
+
 ### `LOCK`
 
-Single line: `<harness name> <ISO-8601 timestamp>`. See the LOCK protocol above.
+Single line: `<harness name> <ISO-8601 UTC timestamp>`. See the LOCK protocol above.

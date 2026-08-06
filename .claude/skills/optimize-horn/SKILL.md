@@ -12,8 +12,9 @@ only harness wiring:
 
 - You are the orchestrator. The first argument is the campaign name; the rest (if any)
   describes the target and seeds the spec interview.
-- **Designer role** → spawn the `horn-designer` subagent, passing the campaign path. Its
-  final message is the params JSON or `STOP`.
+- **Designer role** → spawn the `horn-designer` subagent, passing the absolute campaign
+  path and repository root. Its final message is the params JSON or `STOP …` (a
+  `STOP blocked: …` reply means abort, not finalize).
 - **Trial-runner role** → spawn a fresh `horn-trial-runner` subagent per trial (fresh
   each trial so its polling/tool noise dies with it), passing campaign name, trial
   number, stage, and the params JSON.

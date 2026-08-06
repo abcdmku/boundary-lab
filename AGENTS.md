@@ -11,7 +11,8 @@ this workspace goes through **Boundary Bridge** — an MCP server (`boundary-lab
 - `list_generators` → available geometry generators and their parameter schemas.
 - `generate` blocks briefly (seconds) and returns triangle count, bbox, and a preview URL.
 - `solve` returns immediately with a run id. **Never busy-wait.** Poll `get_run`
-  occasionally or continue other work; t3 threads are woken automatically on completion.
+  occasionally or continue other work; live t3 threads are woken automatically on
+  completion (subagents and other harnesses get no wake-up — they must poll).
 - Results are compact summaries + URLs. Hand preview/plot URLs to the human — they render
   in a browser and in the dashboard.
 

@@ -9,18 +9,32 @@ The designer never generates meshes, never solves, never writes to `trials.jsonl
 
 ## Inputs — re-read fresh on every invocation
 
-You are given only the campaign name/path (`runs/campaigns/<name>/`). Read, every time:
+You are given the campaign path (`runs/campaigns/<name>/`) and the absolute repository
+root it is relative to (the checkout hosting the running bridge — resolve every path
+below against it). Read, every time:
 
-1. `spec.json` — objective, coverage, weights, size limits, fixed params, budget.
-2. **All** of `trials.jsonl` — the full history, successes and failures.
-3. For the best 2–3 successful trials, the detailed per-frequency metrics:
-   `bridge/data/runs/<solve_run_id>/metrics.json` (written by the scorer). The
-   per-frequency beamwidth arrays there tell you *where in the band* a design deviates —
-   the scalar score alone cannot.
-4. The generator's parameter schema, fetched at runtime via the `list_generators` MCP
-   tool. **Never trust parameter names or ranges memorized from examples** — any params
-   in this playbook are illustrative only. Every proposal must conform to the fetched
-   schema, with `spec.fixed_params` included unchanged.
+1. `spec.json` — the whole thing: objective, coverage, band, weights, size limits,
+   `fixed_params`, `generator`, `mesh` gates (your proposals must be meshable under
+   `mesh.max_triangles` — bigger geometry means more triangles, and gate failures burn
+   budget), `solve` (the comparison fidelity), and `budget`.
+2. **All** of `trials.jsonl` — the full history, successes and failures. The trial you
+   are proposing is `N` = highest trial number present + 1 (or 1 if the file is missing
+   or empty). The current champion is the highest-scoring comparable `"ok"` line —
+   recompute it from this file; `best.json` is the orchestrator's cache, not your
+   source of truth.
+3. `log.md` — your own past hypotheses live here; this is your persisted strategy memory
+   (which axis you were moving, what step size, what you predicted). Skim the tail
+   before proposing. If its last heading is a proposal for trial `N` with no recorded
+   outcome, a previous invocation died after logging — supersede it, note that, and
+   continue.
+4. For the best 2–3 successful trials, the detailed per-frequency metrics:
+   `bridge/data/runs/<solve_run_id>/metrics.json` (written into the solve run's
+   directory by the scorer). The per-frequency beamwidth arrays there tell you *where in
+   the band* a design deviates — the scalar score alone cannot. If a `metrics.json` is
+   missing, work from the `trials.jsonl` key_metrics and say so in your hypothesis.
+5. The generator's parameter schema, fetched at runtime via the `list_generators` MCP
+   tool (pass `workspace`). **Never trust parameter names or ranges memorized from
+   examples** — any params in this playbook are illustrative only.
 
 ## Acoustic reasoning guidance
 
@@ -45,33 +59,48 @@ Use real horn acoustics, not blind parameter search:
 
 ## Strategy
 
-- **Screening first.** While history has fewer than `budget.screen_trials` successful
-  trials (default 4), propose diverse seeds spread across the feasible parameter space —
-  corners of the size envelope, contrasting slot ratios — not small steps.
+- **Screening first.** While history has fewer than `budget.screen_trials` trials with
+  `status: "ok"` (default 4; the orchestrator stamps stages by the same count), propose
+  diverse seeds spread across the feasible parameter space — contrasting slot ratios,
+  mouths well inside `size_limit_mm` (a corner-of-envelope mouth is a likely
+  `max_triangles` gate failure).
 - **Then coordinate-descent / trust-region refinement.** Identify from history which
   parameters the score is most sensitive to; move 1–2 of them at a time from the current
-  champion. Shrink step sizes when moves stop paying (two consecutive non-improvements on
-  an axis → halve the step or switch axis).
+  champion. Shrink steps when moves stop paying (two consecutive non-improvements on an
+  axis → halve the step or switch axis); record the axis and step in your hypothesis so
+  your next invocation can reconstruct the state from `log.md`.
 - **Failures are information.** `score: null` trials mark infeasible regions (too many
   triangles, mesh quality, solver failure). Steer proposals away from — but near — those
-  boundaries; do not re-propose params identical to any previous trial.
-- **Cross-fidelity ban.** Never compare scores between trials whose `solve_settings`
-  differ or whose triangle counts differ grossly (rule of thumb: >2× apart). Provenance
-  is on every `trials.jsonl` line and in each run's `metrics.json`. If history somehow
-  contains mixed fidelities, compare only within the fidelity that matches `spec.solve`,
-  and note the exclusion in your hypothesis.
+  boundaries. Never re-propose params materially identical (within ~1% per parameter) to
+  any previous trial.
+- **Cross-fidelity ban.** Trials are comparable only if their `solve_settings` equal the
+  spec's `solve` block; ignore `verify`-stage lines and any line solved at other
+  settings when ranking. (The finalization verify-vs-champion check is the orchestrator's
+  deliberate exception, not yours.) Within comparable trials, distrust score deltas
+  between meshes at opposite ends of the allowed triangle range — a 3k-triangle and a
+  9k-triangle mesh are both legal but not finely comparable; prefer like-for-like, and
+  note it when you cannot.
+- **Stopping is qualitative for you.** The orchestrator alone enforces the numeric
+  budget/patience/target checks. You STOP only for reasons a human designer would:
+  the objective is infeasible within the limits (cite the per-frequency evidence), or no
+  physically-motivated move remains untried.
 
 ## Output contract
 
-1. **Before returning**, append a short `## Trial N proposal` section to
-   `runs/campaigns/<name>/log.md`: the hypothesis (what you expect this change to do and
-   why, in acoustic terms) in 2–4 sentences.
-2. Return **exactly one** of:
-   - a single JSON object containing the complete generator params for the next trial
-     (all required schema fields, `fixed_params` merged in, nothing else — no wrapper, no
-     commentary around the JSON), or
-   - the word `STOP` followed by a one-paragraph reason (converged; budget exhausted per
-     spec; objective infeasible within limits — cite the evidence).
+1. **Before returning**, append to `runs/campaigns/<name>/log.md`: a short
+   `## Trial N proposal` section with your hypothesis (what you expect this change to do
+   and why, in acoustic terms; plus current axis/step if refining) in 2–4 sentences — or,
+   when stopping, a `## STOP` section with the rationale.
+2. Your final message is **exactly one** of:
+   - the single JSON object of generator params for the next trial — every required
+     schema field, any optional schema fields you are using (roundover, pinch, …),
+     `spec.fixed_params` merged in unchanged, and **no keys outside the schema** (no
+     generator id, no commentary keys). Output it bare or as a single fenced JSON block,
+     with no other text;
+   - a message whose **first word is `STOP`** (uppercase), followed by a one-paragraph
+     reason. Use a reason starting with `blocked:` only for mechanical failures (missing
+     or unreadable spec/trials files, bridge unreachable) — the orchestrator aborts on
+     those instead of finalizing.
 
 The orchestrator passes your params verbatim to the trial-runner. Malformed output stalls
 the whole campaign, so keep the final message clean.
