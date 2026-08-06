@@ -154,6 +154,20 @@ function pump(kind: store.RunKind) {
   startJob(run);
 }
 
+/**
+ * blabctl's --name is validated as a safe filename stem (it becomes
+ * <name>.msh / <name>.cfg inside the run dir), but run names are
+ * human-readable display strings ("ath_waveguide mesh"). Slug the display
+ * name into a stem blabctl accepts; the run record keeps the pretty name.
+ */
+function fileStem(name: string): string {
+  const slug = name
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 80);
+  return slug.length > 0 ? slug : "case";
+}
+
 function buildArgs(run: store.Run): string[] {
   const dir = store.runDir(run.id);
   if (run.kind === "mesh") {
@@ -169,7 +183,7 @@ function buildArgs(run: store.Run): string[] {
       "--out",
       dir,
       "--name",
-      run.name,
+      fileStem(run.name),
     ];
   }
   // solve: params = { meshRunId, fmin?, fmax?, count?, backend?, symmetry? }
@@ -179,8 +193,9 @@ function buildArgs(run: store.Run): string[] {
     store.runDir(String(run.params.meshRunId)),
     "--out",
     dir,
-    "--julia-exe",
-    config.juliaExecutable,
+    // Only pass an explicit Julia when configured — otherwise let blabctl's
+    // own resolution (env, known install, PATH) find it.
+    ...(config.juliaExecutable ? ["--julia-exe", config.juliaExecutable] : []),
   ];
   for (const key of ["fmin", "fmax", "count", "backend", "symmetry"] as const) {
     const value = run.params[key];
@@ -206,8 +221,12 @@ function startJob(run: store.Run) {
     cwd: config.repoRoot,
     env: {
       ...process.env,
-      BLAB_JULIA_EXECUTABLE: config.juliaExecutable,
-      BLAB_JULIA_EXE: config.juliaExecutable, // the name blabctl actually reads
+      ...(config.juliaExecutable
+        ? {
+            BLAB_JULIA_EXECUTABLE: config.juliaExecutable,
+            BLAB_JULIA_EXE: config.juliaExecutable, // the name blabctl actually reads
+          }
+        : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,

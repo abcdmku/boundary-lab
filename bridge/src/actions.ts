@@ -97,6 +97,18 @@ export function deleteRun(id: string) {
   if (!run) throw new ActionError(`unknown run ${id}`, 404);
   if (run.status === "running" || queue.isRunning(id))
     throw new ActionError(`run ${id} is running — cancel it first`, 409);
+  // A queued/running solve reads its mesh run's directory (result.json, mesh
+  // files) when it starts — deleting the mesh out from under it guarantees a
+  // late failure. Block until those solves finish or are cancelled.
+  const dependents = store
+    .listRuns()
+    .filter((r) => r.parentRunId === id && !store.TERMINAL.has(r.status))
+    .map((r) => r.id);
+  if (dependents.length > 0)
+    throw new ActionError(
+      `run ${id} is the mesh for pending solve run(s) ${dependents.join(", ")} — cancel them first`,
+      409,
+    );
   queue.removeQueued(id);
   store.removeRun(id);
 }
