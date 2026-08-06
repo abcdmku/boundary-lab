@@ -47,9 +47,9 @@ export async function resolveWorkspace(workspace: string): Promise<ResolvedThrea
     const project = shell.projects.find((p) => norm(p.workspaceRoot) === w);
     if (project) {
       // workspace root maps to the project's most recent worktree-less thread
-      const t = shell.threads.find(
-        (t) => t.projectId === project.id && t.worktreePath === null && t.archivedAt === null,
-      );
+      const t = shell.threads
+        .filter((t) => t.projectId === project.id && t.worktreePath === null && t.archivedAt === null)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
       if (t) return liveThread(t);
       return {
         threadId: `project:${project.id}`,

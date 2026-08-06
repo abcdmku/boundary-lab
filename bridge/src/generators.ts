@@ -77,7 +77,10 @@ export function refreshGenerators(): Promise<GeneratorsCache> {
       [config.blabctl, "list-generators"],
       {
         cwd: config.repoRoot,
-        env: { ...process.env, BLAB_JULIA_EXECUTABLE: config.juliaExecutable },
+        env: {
+          ...process.env,
+          ...(config.juliaExecutable ? { BLAB_JULIA_EXECUTABLE: config.juliaExecutable } : {}),
+        },
         timeout: 60_000,
         maxBuffer: 16 * 1024 * 1024,
         windowsHide: true,

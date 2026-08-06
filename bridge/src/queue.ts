@@ -109,7 +109,35 @@ function killTree(child: ChildProcess) {
     // taskkill /T takes the whole tree — python child + any Julia grandchildren.
     spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { stdio: "ignore" });
   } else {
-    child.kill("SIGKILL");
+    // The child was spawned detached, so it leads its own process group.
+    // Kill the group (negative pid) so Julia grandchildren die with it —
+    // a lone SIGKILL to python would leave Julia holding the GPU.
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+/**
+ * Bridge is shutting down (SIGINT/SIGTERM): kill every active child tree so no
+ * orphan keeps the GPU, mark those runs cancelled, and drop the queues so the
+ * close-handler pump cannot start new work.
+ */
+export function shutdownAll(reason: string) {
+  for (const lane of Object.values(lanes)) {
+    lane.queue.length = 0;
+    if (lane.active) {
+      lane.active.cancelled = true;
+      killTree(lane.active.child);
+      store.finishRun(lane.active.runId, { status: "cancelled", error: reason });
+      store.setRunPid(lane.active.runId, undefined);
+    }
   }
 }
 
@@ -124,6 +152,20 @@ function pump(kind: store.RunKind) {
     return;
   }
   startJob(run);
+}
+
+/**
+ * blabctl's --name is validated as a safe filename stem (it becomes
+ * <name>.msh / <name>.cfg inside the run dir), but run names are
+ * human-readable display strings ("ath_waveguide mesh"). Slug the display
+ * name into a stem blabctl accepts; the run record keeps the pretty name.
+ */
+function fileStem(name: string): string {
+  const slug = name
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 80);
+  return slug.length > 0 ? slug : "case";
 }
 
 function buildArgs(run: store.Run): string[] {
@@ -141,7 +183,7 @@ function buildArgs(run: store.Run): string[] {
       "--out",
       dir,
       "--name",
-      run.name,
+      fileStem(run.name),
     ];
   }
   // solve: params = { meshRunId, fmin?, fmax?, count?, backend?, symmetry? }
@@ -151,8 +193,9 @@ function buildArgs(run: store.Run): string[] {
     store.runDir(String(run.params.meshRunId)),
     "--out",
     dir,
-    "--julia-exe",
-    config.juliaExecutable,
+    // Only pass an explicit Julia when configured — otherwise let blabctl's
+    // own resolution (env, known install, PATH) find it.
+    ...(config.juliaExecutable ? ["--julia-exe", config.juliaExecutable] : []),
   ];
   for (const key of ["fmin", "fmax", "count", "backend", "symmetry"] as const) {
     const value = run.params[key];
@@ -178,14 +221,21 @@ function startJob(run: store.Run) {
     cwd: config.repoRoot,
     env: {
       ...process.env,
-      BLAB_JULIA_EXECUTABLE: config.juliaExecutable,
-      BLAB_JULIA_EXE: config.juliaExecutable, // the name blabctl actually reads
+      ...(config.juliaExecutable
+        ? {
+            BLAB_JULIA_EXECUTABLE: config.juliaExecutable,
+            BLAB_JULIA_EXE: config.juliaExecutable, // the name blabctl actually reads
+          }
+        : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+    // POSIX: own process group so killTree can SIGKILL python + Julia together.
+    detached: process.platform !== "win32",
   });
   const active = { runId: run.id, child, cancelled: false, timedOut: false };
   lane.active = active;
+  if (child.pid) store.setRunPid(run.id, child.pid);
 
   const timer = setTimeout(() => {
     active.timedOut = true;
@@ -240,6 +290,7 @@ function startJob(run: store.Run) {
     rl.close();
     logStream.end();
     if (lane.active?.runId === run.id) lane.active = null;
+    store.setRunPid(run.id, undefined);
 
     if (active.cancelled) {
       store.finishRun(run.id, { status: "cancelled" });

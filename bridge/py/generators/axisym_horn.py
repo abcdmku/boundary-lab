@@ -227,6 +227,7 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
         "mesh_path": str(raw_msh),
         "cleaned_msh_path": str(cleaned_msh),
         "stl_path": None,
+        "mirror_axes": [],  # full mesh, never mirrored — symmetry solves are invalid
         "triangles": triangles,
         "bbox_mm": bbox_mm,
         "driven_tag": DRIVEN_TAG,
