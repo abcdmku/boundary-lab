@@ -100,10 +100,13 @@ def cmd_generate(args: argparse.Namespace) -> dict:
     result["name"] = args.name
 
     triangles = int(result["triangles"])
-    if triangles > TRIANGLE_GUARD and not raw_params.get("allow_large"):
+    # Strict identity check: params are arbitrary caller JSON, and any truthy
+    # junk (e.g. the string "false") must not defeat the iteration budget.
+    allow_large = raw_params.get("allow_large") is True
+    if triangles > TRIANGLE_GUARD and not allow_large:
         raise RuntimeError(
             f"Mesh has {triangles} triangles, over the {TRIANGLE_GUARD} guard. "
-            "Coarsen the mesh parameters, or set allow_large: true in the params JSON to override."
+            "Coarsen the mesh parameters, or set allow_large: true (JSON boolean) in the params JSON to override."
         )
 
     driven_tags = tuple(sorted({int(radiator["tag"]) for radiator in result["radiators"]})) or (

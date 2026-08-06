@@ -183,7 +183,15 @@ function persistNow() {
     persistTimer = null;
   }
   fs.mkdirSync(config.dataDir, { recursive: true });
-  fs.writeFileSync(stateFile(), JSON.stringify(state, null, 2));
+  // Atomic replace: write a temp file, then rename over state.json. A
+  // force-kill mid-write must never truncate the ledger — losing it would
+  // drop the live-pid record the restart orphan-reap depends on. rename on
+  // the same volume is atomic on POSIX; on Windows libuv uses
+  // MoveFileEx(REPLACE_EXISTING), so state.json is always a last-good copy.
+  const file = stateFile();
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.renameSync(tmp, file);
 }
 
 function persist() {

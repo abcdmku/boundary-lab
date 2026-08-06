@@ -176,7 +176,8 @@ app.get("*", (req, res) => {
     .send("boundary-bridge is running. UI not built yet (bridge/ui/index.html missing).");
 });
 
-app.listen(config.port, () => {
+app.listen(config.port, config.host, () => {
+  console.log(`[bridge] listening on  ${config.host}:${config.port}`);
   console.log(`[bridge] ui + api      ${config.publicUrl}/`);
   console.log(`[bridge] mcp endpoint  ${config.publicUrl}/mcp`);
   console.log(`[bridge] blabctl       ${config.python} ${config.blabctl}`);
