@@ -323,6 +323,8 @@ export function addArtifact(id: string, artifact: Artifact) {
 /**
  * Merge fields into run.summary (object-ifying a non-object summary) —
  * used to lift post-hoc metrics (score, subscores) into the run record.
+ * A patch value of `undefined` deletes the key, so a rerun analysis that
+ * drops a metric also removes the previously lifted field.
  */
 export function mergeSummary(id: string, patch: Record<string, unknown>) {
   const run = getRun(id);
@@ -331,7 +333,12 @@ export function mergeSummary(id: string, patch: Record<string, unknown>) {
     run.summary !== null && typeof run.summary === "object" && !Array.isArray(run.summary)
       ? (run.summary as Record<string, unknown>)
       : {};
-  run.summary = { ...base, ...patch };
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  run.summary = merged;
   persist();
   changed(id);
 }

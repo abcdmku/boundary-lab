@@ -159,7 +159,9 @@ app.get("/api/events", (req, res) => {
 app.get("/artifacts/:runId/*", (req, res) => {
   const run = store.getRun(req.params.runId);
   if (!run) return res.status(404).json({ error: "unknown run" });
-  const rel = decodeURIComponent((req.params as Record<string, string>)["0"] ?? "");
+  // Express already percent-decodes route params — decoding again here would
+  // throw on literal % in filenames and misread %2F as a path separator.
+  const rel = (req.params as Record<string, string>)["0"] ?? "";
   const dir = path.resolve(store.runDir(run.id));
   const file = path.resolve(dir, rel);
   if (path.relative(dir, file).startsWith("..")) return res.status(403).json({ error: "forbidden" });

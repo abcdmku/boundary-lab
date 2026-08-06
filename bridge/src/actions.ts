@@ -178,11 +178,17 @@ export function rescanRun(id: string): store.Run {
       const metrics: unknown = JSON.parse(fs.readFileSync(metricsFile, "utf8"));
       if (metrics !== null && typeof metrics === "object" && !Array.isArray(metrics)) {
         const m = metrics as Record<string, unknown>;
-        const patch: Record<string, unknown> = {};
-        if (typeof m.score === "number" && Number.isFinite(m.score)) patch.score = m.score;
-        if (m.subscores !== null && typeof m.subscores === "object" && !Array.isArray(m.subscores))
-          patch.subscores = m.subscores;
-        if (Object.keys(patch).length > 0) store.mergeSummary(id, patch);
+        // The current metrics file is authoritative: fields it omits (or holds
+        // invalid values for) are cleared from the summary (undefined =
+        // delete in mergeSummary) so score and subscores never mix analysis
+        // runs. Unrelated solver-summary fields are untouched.
+        store.mergeSummary(id, {
+          score: typeof m.score === "number" && Number.isFinite(m.score) ? m.score : undefined,
+          subscores:
+            m.subscores !== null && typeof m.subscores === "object" && !Array.isArray(m.subscores)
+              ? m.subscores
+              : undefined,
+        });
       }
     } catch {
       /* malformed metrics.json — leave summary untouched */
