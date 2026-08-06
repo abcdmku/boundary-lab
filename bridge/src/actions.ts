@@ -137,10 +137,16 @@ export function rescanRun(id: string): store.Run {
       if (known.has(url)) continue;
       known.add(url);
       // addArtifact dedupes by name, so a basename collision (same filename in
-      // two subdirectories) would silently drop the second file — fall back to
-      // the run-dir-relative path as the display name to keep both.
-      const name = usedNames.has(entry.name) ? rel.split(path.sep).join("/") : entry.name;
-      if (usedNames.has(name)) continue;
+      // two places) would silently drop the later file. Prefer the basename,
+      // fall back to the run-dir-relative path, and as a last resort (a root
+      // file whose relative path IS the taken basename) add a numeric suffix —
+      // every distinct URL must end up registered under a unique name.
+      let name = usedNames.has(entry.name) ? rel.split(path.sep).join("/") : entry.name;
+      if (usedNames.has(name)) {
+        const ext = path.extname(name);
+        const stem = name.slice(0, name.length - ext.length);
+        for (let i = 2; usedNames.has(name); i++) name = `${stem}~${i}${ext}`;
+      }
       usedNames.add(name);
       store.addArtifact(id, {
         name,
