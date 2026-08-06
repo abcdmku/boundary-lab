@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Badge } from "../ui/badge.jsx";
 import { StatusDot } from "./StatusDot.jsx";
 import { Essentials } from "./Essentials.jsx";
@@ -6,14 +5,13 @@ import { RunActions } from "./RunActions.jsx";
 import { RunDetail } from "./RunDetail.jsx";
 import { relTime } from "../../lib/format";
 
-export function RunRow({ run, runs, api, refetch, onOpenLightbox }) {
-  const [open, setOpen] = useState(false);
+export function RunRow({ run, runs, api, refetch, onOpenLightbox, open, onToggle, onNavigate }) {
   const showProgress =
     run.kind === "solve" && run.status === "running" && run.progress && run.progress.total;
 
   return (
-    <div className="run-card">
-      <div className="run-head" onClick={() => setOpen((v) => !v)}>
+    <div className="run-card" id={"run-" + run.id}>
+      <div className="run-head" onClick={onToggle}>
         {/* fixed-height slot pins the dot to the first line */}
         <span className="run-dot-slot">
           <StatusDot status={run.status} />
@@ -22,9 +20,10 @@ export function RunRow({ run, runs, api, refetch, onOpenLightbox }) {
           <div className="run-title-row">
             <span className="run-name">{run.name || run.id}</span>
             <Badge>{run.kind}</Badge>
+            {run.kind === "mesh" && run.generator && <Badge>{run.generator}</Badge>}
             <span className="run-time">{relTime(run.createdAt)}</span>
           </div>
-          <Essentials run={run} />
+          <Essentials run={run} runs={runs} onNavigate={onNavigate} />
           {showProgress && (
             <div className="run-progress">
               <div

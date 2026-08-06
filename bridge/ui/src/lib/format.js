@@ -2,6 +2,10 @@ export function fmtInt(n) {
   return Number(n).toLocaleString("en-US");
 }
 
+export function fmtScore(v) {
+  return Number(v).toFixed(2);
+}
+
 export function fmtVal(v) {
   if (v === null || v === undefined) return "null";
   if (Array.isArray(v)) return v.map(fmtVal).join(", ");

@@ -91,10 +91,50 @@
   font-variant-numeric: tabular-nums;
 }
 .run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
   margin-top: 2px;
   font-size: 13px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
+}
+.run-meta--error {
+  display: block;
+}
+
+/* ---- link chips: mesh ↔ solve navigation on the meta line ---- */
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+.run-chip:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.run-chip:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.run-chip .run-dot {
+  width: 6px;
+  height: 6px;
 }
 .run-meta--error {
   overflow: hidden;
@@ -268,6 +308,13 @@
 .run-footer a:hover {
   color: var(--foreground);
   text-decoration: underline;
+}
+.run-footer-scores {
+  margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.run-footer-scores:last-child {
+  margin-bottom: 0;
 }
 .run-footer-sep {
   margin: 0 8px;
