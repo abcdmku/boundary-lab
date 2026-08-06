@@ -94,6 +94,10 @@ that is a failed trial — do not re-generate.
 
 ### (c) Score and rescan
 
+> The `score` subcommand and the rescan endpoint below are delivered by the scoring work
+> stream (they are contracts, not yet on every branch). If either is missing on your
+> checkout, campaigns cannot run yet — stop and report rather than improvising a scorer.
+
 When the solve is `done`, from the repository root:
 
 ```

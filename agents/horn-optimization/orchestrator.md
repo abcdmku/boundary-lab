@@ -46,10 +46,14 @@ Exactly one orchestrator may drive a campaign directory at a time.
      queued/running solves) before deleting a stale LOCK by hand. If the timestamp is
      less than ~2 hours old, assume the campaign is live. Never delete another run's
      LOCK yourself.
-   - If it does not exist: create it (creating the campaign directory first if needed).
+   - If it does not exist: create it (creating the campaign directory first if needed)
+     with an **atomic exclusive create** — an operation that fails if the file already
+     exists, e.g. in a POSIX shell `(set -C; echo "claude-code $(date -u +%FT%TZ)" > runs/campaigns/<name>/LOCK)`
+     (noclobber makes the redirect fail on an existing file). If the exclusive create
+     fails, another orchestrator won the race: treat it exactly as "LOCK exists" above.
+     Never use a plain check-then-write, which lets two orchestrators both proceed.
      Contents: one line, `<harness name> <ISO-8601 UTC timestamp>` — harness name is any
-     short stable identifier for your runtime (e.g. `claude-code`, `cursor`, `manual`);
-     get the timestamp from a shell clock (e.g. `date -u +%FT%TZ`).
+     short stable identifier for your runtime (e.g. `claude-code`, `cursor`, `manual`).
 2. Rewrite the LOCK with a fresh timestamp at the start of every trial — including the
    verification trial, which can be the longest — so its age reflects liveness.
 3. Remove the LOCK when the loop ends — on normal finalization, on STOP, and on any
