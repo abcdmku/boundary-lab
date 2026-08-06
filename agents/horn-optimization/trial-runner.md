@@ -14,11 +14,13 @@ for everything else — in particular the generator id (`spec.generator`), the m
 
 Preflight: confirm `spec.json` exists and that `trials.jsonl` (if present) does not
 already contain a line for this trial number — if it does, stop and report instead of
-writing a duplicate. For `verify` trials, use `spec.solve_verify` instead of
-`spec.solve`, `spec.mesh.verify_max_triangles` (if present) instead of
-`spec.mesh.max_triangles`, and `spec.solve_verify_timeout_min` (default
-3 × `solve_timeout_min`) as the timeout — fine meshes can legitimately take an hour or
-more.
+writing a duplicate. For `verify` trials: overlay `spec.mesh_verify_params` (if present)
+onto the given params before generating — these are resolution-only generator parameters
+(e.g. an element-size override) that refine the mesh without touching the champion's
+geometry; use `spec.solve_verify` instead of `spec.solve`,
+`spec.mesh.verify_max_triangles` (if present) instead of `spec.mesh.max_triangles`, and
+`spec.solve_verify_timeout_min` (default 3 × `solve_timeout_min`) as the timeout — fine
+meshes can legitimately take an hour or more.
 
 Work from the repository root that hosts the live bridge — `bridge/data/runs/<runId>/`
 is the bridge's run store, and the `score` command below resolves paths relative to that
@@ -36,16 +38,27 @@ more minutes as a failed trial.
 
 Gate — record a failure line (step d) and **skip the solve entirely** if any of:
 
-- `triangles` > `spec.mesh.max_triangles` (default 9000) — too slow to iterate on
-  (~13.6k ≈ 1 h+ on this GPU; the queue is shared);
-- `triangles` < `spec.mesh.min_triangles` (default 3000) — anti-gaming floor: a mesh this
-  coarse produces flattering, untrustworthy scores;
-- `triangles` is null/missing — the gates cannot be verified;
+- **Triangle gates use the *effective solved* count**, not the raw `triangles` value:
+  with `symmetry` `"x"` the solver receives the reduced half-mesh, with `"xy"` the
+  quarter-mesh, so `effective = triangles / 1|2|4` for `off`/`x`/`xy` (from the spec's
+  solve block for this stage). Solve cost and fidelity follow the mesh actually sent to
+  the solver — gating the full-mesh count would let a quadrant solve slip under the
+  anti-gaming floor.
+  - `effective` > `spec.mesh.max_triangles` (default 9000) — too slow to iterate on
+    (~13.6k ≈ 1 h+ on this GPU; the queue is shared);
+  - `effective` < `spec.mesh.min_triangles` (default 3000) — anti-gaming floor: a solve
+    this coarse produces flattering, untrustworthy scores;
+- `bboxMm` from the generate result exceeds `spec.size_limit_mm` (width, height, or
+  depth) — the scorer does not enforce the physical envelope, so an oversized design
+  would otherwise be free to become champion;
+- `triangles` or `bboxMm` is null/missing — the gates cannot be verified;
 - `qualityWarning` is non-null in the generate result;
 - the generate run itself failed (record its `runId` as `mesh_run_id` if one was
   returned; `mesh_run_id` is null only when no run id exists at all).
 
-If several gates fire, list all reasons in the `note`.
+If several gates fire, list all reasons in the `note`. Record the raw `triangles` value
+in the trial line (provenance is per-campaign, so symmetry — and thus the effective
+factor — is constant across comparable trials).
 
 ### (b) Solve, poll, timeout
 

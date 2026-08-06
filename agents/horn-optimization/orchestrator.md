@@ -100,36 +100,40 @@ nothing, since creating the LOCK creates it):
 
 For each trial:
 
-1. Refresh the LOCK timestamp.
-2. **Designer**: invoke the designer role (playbook `designer.md`) with the campaign
+1. **Check the stopping criteria (below) against the recorded history first.** If one
+   already holds, go straight to Finalization. Because this check runs before anything
+   else, a resumed (or already-completed) campaign never launches a trial beyond an
+   exhausted budget or past an achieved target.
+2. Refresh the LOCK timestamp.
+3. **Designer**: invoke the designer role (playbook `designer.md`) with the campaign
    path (give it the absolute repository root too). It re-reads spec + history itself
    and returns either exactly one params JSON object or a message starting with `STOP`.
    It appends its hypothesis to `log.md` before returning.
-3. If the designer returned `STOP` (first word of its reply):
+4. If the designer returned `STOP` (first word of its reply):
    - reason starting with `blocked:` → abort: report the blocker to the user, remove the
      LOCK, and stop (no finalization);
    - any other reason → go to Finalization.
-4. Determine the stage: `"screen"` until `budget.screen_trials` (default 4) trials with
+5. Determine the stage: `"screen"` until `budget.screen_trials` (default 4) trials with
    `status: "ok"` exist in `trials.jsonl`, `"refine"` afterwards. (`"verify"` is used
    only by Finalization.) This matches the designer's own screening rule, so the stage
    label always agrees with the strategy that produced the proposal.
-5. **Trial-runner**: invoke the trial-runner role (playbook `trial-runner.md`) with the
+6. **Trial-runner**: invoke the trial-runner role (playbook `trial-runner.md`) with the
    campaign name, trial number (last recorded trial + 1, or 1), stage, and the params
    JSON. The trial-runner stays alive for the whole trial — polling the solve per its
    playbook — and returns only after it has appended its `trials.jsonl` line. Wait for
    it; never start anything else meanwhile.
-6. Re-read the last line of `trials.jsonl` (trust the file, not the report). If no line
+7. Re-read the last line of `trials.jsonl` (trust the file, not the report). If no line
    for this trial appeared (runner crashed): check `list_runs`/`get_run` for a solve
    still queued or running for this trial — if one exists, keep waiting (poll with ~30 s
    sleeps) until it is terminal; do NOT start another trial. Once nothing is in flight,
    append the missing line yourself with `status: "failed"`, `score: null`, and a note
    `trial-runner crashed` (this is the one sanctioned exception to the trial-runner
    being the sole writer).
-7. Append a one-line outcome to `log.md`, e.g.
+8. Append a one-line outcome to `log.md`, e.g.
    `Trial 7 (refine): score 0.842 (best 0.851 @ t5) — ok`.
-8. If the trial improved on the best score so far, rewrite `best.json` (with
+9. If the trial improved on the best score so far, rewrite `best.json` (with
    `"verified": false`).
-9. Check the stopping criteria (below). If any fires → Finalization. Else repeat from 1.
+10. Repeat from 1.
 
 Failures (`status: "failed"`, `score: null`) count against `max_trials` and are valuable
 data — the designer treats them as infeasible-region information. Do not retry a failed
@@ -138,7 +142,8 @@ exception, and it happens inside the trial-runner).
 
 ## Stopping criteria
 
-All read from `spec.json` → `budget`; check after every recorded trial:
+All read from `spec.json` → `budget`; evaluated at the top of every loop iteration,
+which also covers resuming a campaign whose budget is already spent:
 
 - `max_trials` trials recorded in `trials.jsonl` (including failures; the verification
   trial is extra and does not count against this budget).
@@ -158,11 +163,14 @@ does not duplicate them.
    produced no feasible design (and why, from the failure notes), remove the LOCK, and
    report to the user.
 2. Run one **verification trial** through the trial-runner with stage `"verify"`, the
-   next trial number, and the champion's exact generator params. The trial-runner uses
-   `spec.solve_verify` solve settings for verify trials (finer than `spec.solve`: wider
-   band and/or more frequency points), the relaxed `mesh.verify_max_triangles` cap if the
-   spec defines one, and the longer `solve_verify_timeout_min` — fine meshes can take an
-   hour or more on this GPU.
+   next trial number, and the champion's exact generator params. The trial-runner
+   overlays `spec.mesh_verify_params` onto them — resolution-only generator parameters
+   (e.g. a smaller element size) that actually refine the mesh; merely raising the
+   triangle cap would regenerate the identical iteration mesh, since density is a
+   generator param. It also uses `spec.solve_verify` solve settings (finer than
+   `spec.solve`: wider band and/or more frequency points), the relaxed
+   `mesh.verify_max_triangles` cap, and the longer `solve_verify_timeout_min` — fine
+   meshes can take an hour or more on this GPU.
 3. Update `best.json`: set `"verified": true` only if the verify score confirms the
    champion (verify score ≥ best score − 2 × `min_gain`). This is a deliberate
    cross-fidelity comparison — its whole purpose is to detect coarse-settings flattery,
@@ -204,6 +212,7 @@ runs/campaigns/cd90x60/
   "size_limit_mm": { "w": 400, "h": 250, "d": 300 },
   "fixed_params": { "throat_diameter_mm": 25.4 },
   "mesh": { "max_triangles": 9000, "min_triangles": 3000, "verify_max_triangles": 14000 },
+  "mesh_verify_params": { "element_size_mm": 4 },
   "solve": { "fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_verify": { "fmin": 500, "fmax": 20000, "count": 48, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_timeout_min": 20,
@@ -227,6 +236,13 @@ Notes:
 - `solve_timeout_min` (and `solve_verify_timeout_min` for verify trials, default
   3 × `solve_timeout_min`) is enforced by the trial-runner, which cancels a timed-out
   run through the bridge HTTP API.
+- `mesh.max_triangles` / `min_triangles` gate the **effective solved** triangle count
+  (full count ÷ 2 for symmetry `x`, ÷ 4 for `xy` — the solver receives the reduced
+  mesh); see `trial-runner.md`. The trial-runner also rejects meshes whose `bboxMm`
+  exceeds `size_limit_mm`.
+- `mesh_verify_params` are resolution-only parameter overrides (names must come from the
+  generator's schema; the value here is illustrative) applied on top of the champion's
+  params for the verification trial — they must refine the mesh, never change geometry.
 
 ### `trials.jsonl` — schema and example lines
 
