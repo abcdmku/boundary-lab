@@ -253,6 +253,14 @@ class TestValidation:
         # mouth_roundover is ignored for back='enclosure', so no error.
         horn.build_quadrant({"back": "enclosure", "mouth_roundover": 4})
 
+    def test_mouth_outline_must_contain_slot_outline(self):
+        # Codex review case: mouth dims equal the slot, but a low superellipse
+        # exponent rounds the mouth corners inside the slot's arc.
+        with pytest.raises(ValueError, match="mouth outline does not contain the slot outline"):
+            horn.build_quadrant({"mouth_width": 20, "mouth_height": 160, "mouth_superellipse_n": 2})
+        # A slightly larger squarer mouth contains the slot and builds fine.
+        horn.build_quadrant({"mouth_width": 40, "mouth_height": 180, "mouth_superellipse_n": 8})
+
     def test_angular_segments_must_be_multiple_of_four(self):
         with pytest.raises(ValueError, match="angular_segments must be a multiple of 4"):
             horn.build_quadrant({"angular_segments": 19})

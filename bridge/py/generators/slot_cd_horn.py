@@ -359,6 +359,19 @@ def _derive(p: dict) -> dict:
         raise ValueError("mouth_width must be at least slot_width: the CD flare cannot contract.")
     if float(p["mouth_height"]) < float(p["slot_length"]):
         raise ValueError("mouth_height must be at least slot_length: the CD flare cannot contract.")
+    # Bounding dimensions are not enough: with a mouth barely larger than the slot and a low
+    # superellipse exponent, the rounded mouth corners can cut inside the slot's arc, making
+    # the flare contract locally. Check analytic containment of the slot outline in the mouth.
+    slot_check = sections.clipped_circle_quadrant(half_slot_len, d["w_slot"], 129)
+    exponent = float(p["mouth_superellipse_n"])
+    containment = (slot_check[:, 0] / (float(p["mouth_width"]) / 2.0)) ** exponent + (
+        slot_check[:, 1] / (float(p["mouth_height"]) / 2.0)
+    ) ** exponent
+    if float(containment.max()) > 1.0 + 1e-9:
+        raise ValueError(
+            "mouth outline does not contain the slot outline: the CD flare would contract locally near the "
+            "slot corners. Increase mouth_width, mouth_height, or mouth_superellipse_n."
+        )
     d["z_m"] = d["z_e"] + float(p["flare_depth"])
 
     roundover = float(p["mouth_roundover"])
