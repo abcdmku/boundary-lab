@@ -115,6 +115,7 @@ export function rescanRun(id: string): store.Run {
 
   const dir = path.resolve(store.runDir(id));
   const known = new Set(run.artifacts.map((a) => a.url));
+  const usedNames = new Set(run.artifacts.map((a) => a.name));
   const walk = (abs: string) => {
     let entries: fs.Dirent[];
     try {
@@ -135,8 +136,14 @@ export function rescanRun(id: string): store.Run {
       const url = `/artifacts/${id}/${relUrlPath}`;
       if (known.has(url)) continue;
       known.add(url);
+      // addArtifact dedupes by name, so a basename collision (same filename in
+      // two subdirectories) would silently drop the second file — fall back to
+      // the run-dir-relative path as the display name to keep both.
+      const name = usedNames.has(entry.name) ? rel.split(path.sep).join("/") : entry.name;
+      if (usedNames.has(name)) continue;
+      usedNames.add(name);
       store.addArtifact(id, {
-        name: entry.name,
+        name,
         kind: store.classify(entry.name),
         url,
       });
