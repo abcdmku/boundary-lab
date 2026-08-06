@@ -37,6 +37,7 @@ def safe_name(value: str) -> str:
         )
     return value
 
+
 sys.path.insert(0, str(BRIDGE_DIR))
 
 # Stray prints from blab/gmsh/matplotlib go to stderr; stdout stays strict NDJSON.
@@ -316,6 +317,69 @@ def cmd_solve(args: argparse.Namespace) -> dict:
     return result
 
 
+def _derive_mesh_result(solve_run: Path) -> dict | None:
+    """Locate the mesh run's result.json from the solve run's config.toml.
+
+    Generators may nest the mesh file several directories below the mesh run dir
+    (e.g. ATH's ``<run>/<name>/ABEC_FreeStanding/*.msh``), so walk up the mesh
+    file's ancestors until a directory containing result.json is found.
+    """
+    import tomllib
+
+    config_path = solve_run / "config.toml"
+    if not config_path.exists():
+        return None
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        mesh_file = Path(config["meshes"][0]["file"])
+    except (tomllib.TOMLDecodeError, KeyError, IndexError, TypeError):
+        return None
+    for ancestor in mesh_file.parents:
+        candidate = ancestor / "result.json"
+        if candidate.exists():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    return None
+
+
+def cmd_score(args: argparse.Namespace) -> dict:
+    import metrics as metrics_mod
+
+    solve_run = Path(args.solve_run).resolve()
+    solve_result = json.loads((solve_run / "result.json").read_text(encoding="utf-8"))
+    raw_npz = solve_run / "pressure_data_raw.npz"
+    if not raw_npz.exists():
+        pressure_npz = solve_result.get("pressure_npz") or []
+        if pressure_npz:
+            raw_npz = Path(pressure_npz[0])
+    if not raw_npz.exists():
+        raise RuntimeError(f"Raw pressure NPZ not found in solve run: {raw_npz}")
+    spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+
+    if args.mesh_run:
+        mesh_result = json.loads((Path(args.mesh_run).resolve() / "result.json").read_text(encoding="utf-8"))
+    else:
+        mesh_result = _derive_mesh_result(solve_run)
+        if mesh_result is None:
+            progress("score", "Mesh run result.json not found from config.toml; size subscore uses defaults")
+
+    progress("score", f"Scoring {raw_npz.name}")
+    result = metrics_mod.compute_metrics(raw_npz, spec, mesh_result=mesh_result, solve_result=solve_result)
+
+    out_dirs = [solve_run]
+    if args.out:
+        out_dir = Path(args.out).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dirs.append(out_dir)
+    for out_dir in out_dirs:
+        (out_dir / "metrics.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        plots_dir = out_dir / "plots"
+        plots_dir.mkdir(exist_ok=True)
+        progress("plot", f"Writing scoring plots to {plots_dir}")
+        metrics_mod.plot_beamwidth_vs_freq(result, plots_dir / "beamwidth_vs_freq.png")
+        metrics_mod.plot_di_curves(result, plots_dir / "di_curves.png")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blabctl", description="NDJSON bridge CLI for Boundary Lab.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -340,6 +404,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--julia-exe", default=None, help="Julia executable (default: BLAB_JULIA_EXE env or known install)"
     )
 
+    p_score = sub.add_parser("score", help="Score a completed solve run against an objective spec.")
+    p_score.add_argument("--solve-run", required=True, help="Directory containing result.json from solve")
+    p_score.add_argument("--spec", required=True, help="Path to the objective spec JSON")
+    p_score.add_argument(
+        "--mesh-run", default=None, help="Mesh run directory (default: derived from the solve config.toml)"
+    )
+    p_score.add_argument("--out", default=None, help="Extra directory to copy metrics.json and plots into")
+
     p_preview = sub.add_parser("preview", help="Render a standalone mesh preview PNG.")
     p_preview.add_argument("--mesh", required=True)
     p_preview.add_argument("--out", required=True)
@@ -351,6 +423,7 @@ COMMANDS = {
     "list-generators": cmd_list_generators,
     "generate": cmd_generate,
     "solve": cmd_solve,
+    "score": cmd_score,
     "preview": cmd_preview,
 }
 
