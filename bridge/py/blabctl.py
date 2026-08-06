@@ -37,6 +37,7 @@ def safe_name(value: str) -> str:
         )
     return value
 
+
 sys.path.insert(0, str(BRIDGE_DIR))
 
 # Stray prints from blab/gmsh/matplotlib go to stderr; stdout stays strict NDJSON.
