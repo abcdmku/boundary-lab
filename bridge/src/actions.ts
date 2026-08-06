@@ -2,6 +2,8 @@
  * The one internal API for actions. A UI button and an MCP tool that do the
  * same thing call the same function here — never two code paths.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
@@ -99,6 +101,70 @@ export function deleteRun(id: string) {
     throw new ActionError(`run ${id} is running — cancel it first`, 409);
   queue.removeQueued(id);
   store.removeRun(id);
+}
+
+/**
+ * Re-ingest a run's directory after the fact: register files written post-hoc
+ * (analysis plots, metrics) as artifacts, and lift metrics.json's score /
+ * subscores into run.summary so the dashboard can show them. Idempotent —
+ * existing artifacts are deduped by URL. SSE fires via the store mutations.
+ */
+export function rescanRun(id: string): store.Run {
+  const run = store.getRun(id);
+  if (!run) throw new ActionError(`unknown run ${id}`, 404);
+
+  const dir = path.resolve(store.runDir(id));
+  const known = new Set(run.artifacts.map((a) => a.url));
+  const walk = (abs: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return; // run dir missing/unreadable — nothing to ingest
+    }
+    for (const entry of entries) {
+      const full = path.join(abs, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const rel = path.relative(dir, full);
+      if (rel === "job.log") continue; // registered by addLogArtifact
+      const relUrlPath = rel.split(path.sep).map(encodeURIComponent).join("/");
+      const url = `/artifacts/${id}/${relUrlPath}`;
+      if (known.has(url)) continue;
+      known.add(url);
+      store.addArtifact(id, {
+        name: entry.name,
+        kind: store.classify(entry.name),
+        url,
+      });
+    }
+  };
+  walk(dir);
+
+  // Lift score/subscores from metrics.json (written post-hoc by the analysis
+  // step). Tolerate absence and malformed content silently — the schema is
+  // evolving in a parallel stream.
+  const metricsFile = path.join(dir, "metrics.json");
+  if (fs.existsSync(metricsFile)) {
+    try {
+      const metrics: unknown = JSON.parse(fs.readFileSync(metricsFile, "utf8"));
+      if (metrics !== null && typeof metrics === "object" && !Array.isArray(metrics)) {
+        const m = metrics as Record<string, unknown>;
+        const patch: Record<string, unknown> = {};
+        if (typeof m.score === "number" && Number.isFinite(m.score)) patch.score = m.score;
+        if (m.subscores !== null && typeof m.subscores === "object" && !Array.isArray(m.subscores))
+          patch.subscores = m.subscores;
+        if (Object.keys(patch).length > 0) store.mergeSummary(id, patch);
+      }
+    } catch {
+      /* malformed metrics.json — leave summary untouched */
+    }
+  }
+
+  return store.getRun(id)!;
 }
 
 export function fullState() {

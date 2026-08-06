@@ -108,6 +108,14 @@ app.delete("/api/runs/:id", (req, res) => {
   }
 });
 
+app.post("/api/runs/:id/rescan", (req, res) => {
+  try {
+    res.json(actions.rescanRun(req.params.id));
+  } catch (err) {
+    fail(res, err);
+  }
+});
+
 app.get("/api/runs/:id", (req, res) => {
   const run = store.getRun(req.params.id);
   if (!run) return res.status(404).json({ error: `unknown run ${req.params.id}` });
