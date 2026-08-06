@@ -30,3 +30,10 @@ this workspace goes through **Boundary Bridge** — an MCP server (`boundary-lab
   (meshes, field data, plots) live under `bridge/data/` and are not committed.
 - The direct CLI (`blab clean|solve|prepare|plot`) exists, but prefer the bridge tools so
   runs are queued, visible, and comparable in the dashboard.
+
+## Horn-optimization campaigns
+
+- Playbooks in `agents/horn-optimization/` — start with `orchestrator.md` (designer and
+  trial-runner roles alongside). Campaign state lives in `runs/campaigns/<name>/`
+  (`spec.json`, `trials.jsonl`, `log.md`, `best.json`, `LOCK`). Scoring:
+  `python bridge/py/blabctl.py score --solve-run <dir> --mesh-run <dir> --spec <spec.json>`.
