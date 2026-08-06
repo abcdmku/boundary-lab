@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -17,7 +18,24 @@ from pathlib import Path
 BRIDGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BRIDGE_DIR.parents[1]
 DEFAULT_JULIA_EXE = Path("C:/Users/Borg/AppData/Local/Programs/Julia-1.12.6/bin/julia.exe")
-TRIANGLE_GUARD = 25000
+# Iteration budget for this machine (RTX 5080): ~9k triangles solves in minutes;
+# the documented 13.6k case already takes over an hour. Larger meshes are for
+# final verification only — set allow_large: true in the params JSON.
+TRIANGLE_GUARD = 9000
+
+# --name becomes filename stems like <name>.msh / <name>.cfg inside the run
+# directory. Restrict it to a safe basename: no path separators, no leading
+# dot (rules out "." / ".."), no absolute paths.
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,79}$")
+
+
+def safe_name(value: str) -> str:
+    if not SAFE_NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid --name {value!r}: use letters, digits, '.', '_' or '-' only "
+            "(no path separators, must not start with '.', max 80 chars)"
+        )
+    return value
 
 sys.path.insert(0, str(BRIDGE_DIR))
 
@@ -163,6 +181,30 @@ def cmd_solve(args: argparse.Namespace) -> dict:
             raise RuntimeError(
                 "symmetry requires the unmirrored reduced mesh, but the generate result has no reduced_msh_path."
             )
+        # The reduced mesh is only valid for the symmetry it was reduced with:
+        # a quadrants=1 quarter mesh (mirror axes xy) solved with symmetry="x"
+        # passes BEAT's positive-X check but reconstructs only the X reflection,
+        # silently producing wrong pressures. Require an exact match with the
+        # mirror axes the generator detected from Ath's solving file.
+        mirror_axes = generate_result.get("mirror_axes")
+        if mirror_axes is None:
+            raise RuntimeError(
+                "This generate result does not record mirror_axes (produced by an older bridge). "
+                "Re-generate the mesh, or solve with symmetry=off on the full cleaned mesh."
+            )
+        detected = {str(axis).lower() for axis in mirror_axes}
+        requested = set(symmetry)  # "x" -> {"x"}, "xy" -> {"x","y"}
+        if requested != detected:
+            detected_label = "".join(sorted(detected)) or "none"
+            raise RuntimeError(
+                f"symmetry='{symmetry}' does not match the reduced mesh, which was reduced with "
+                f"mirror axes '{detected_label}'. "
+                + (
+                    f"Use symmetry='{detected_label}', or symmetry=off for the full mesh."
+                    if detected
+                    else "This mesh was not mirrored; use symmetry=off."
+                )
+            )
         mesh_file = Path(reduced)
     if not mesh_file.exists():
         raise RuntimeError(f"Mesh file from generate result not found: {mesh_file}")
@@ -281,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_generate.add_argument("--generator", required=True)
     p_generate.add_argument("--params", default=None, help="Path to a params JSON file (defaults apply if omitted)")
     p_generate.add_argument("--out", required=True, help="Run directory for all outputs")
-    p_generate.add_argument("--name", default="case")
+    p_generate.add_argument("--name", default="case", type=safe_name)
 
     p_solve = sub.add_parser("solve", help="Solve a generated mesh and produce plots.")
     p_solve.add_argument("--mesh-run", required=True, help="Directory containing result.json from generate")

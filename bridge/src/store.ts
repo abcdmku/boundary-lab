@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import { config } from "./config.ts";
 
 export type RunKind = "mesh" | "solve";
@@ -46,6 +47,9 @@ export interface Run {
   workspace?: string;
   threadId?: string;
   progress?: Progress;
+  /** OS pid of the live blabctl child, persisted so a restarted bridge can
+   *  reap orphans. Cleared when the child exits. */
+  pid?: number;
   /** The python layer's final result JSON (blabctl's "result" event). */
   summary?: unknown;
   error?: string;
@@ -76,15 +80,98 @@ export function loadStore() {
       state = { runs: [] };
     }
   }
-  // The queue is in-memory only: anything mid-flight when the bridge died is dead.
+  // The queue is in-memory only: anything mid-flight when the bridge died is
+  // dead — but its OS process may not be. Reap verified orphans BEFORE the
+  // queue accepts work, or a leftover Julia solve and a new one would share
+  // the GPU.
   for (const run of state.runs) {
     if (run.status === "queued" || run.status === "running") {
+      if (run.status === "running" && run.pid) killVerifiedOrphan(run);
       run.status = "failed";
       run.finishedAt = now();
       run.error = "interrupted by bridge restart";
+      delete run.pid;
     }
   }
   persistNow();
+}
+
+/** Best-effort command line of a live process; null when it no longer exists. */
+function processCommandLine(pid: number): string | null {
+  try {
+    if (process.platform === "win32") {
+      const out = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`,
+        ],
+        { encoding: "utf8", timeout: 15_000, windowsHide: true },
+      );
+      const text = (out.stdout ?? "").trim();
+      return text.length ? text : null;
+    }
+    if (process.platform === "linux") {
+      try {
+        const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        const text = raw.split("\0").join(" ").trim();
+        if (text.length) return text;
+      } catch {
+        return null;
+      }
+    }
+    const out = spawnSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    const text = (out.stdout ?? "").trim();
+    return text.length ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Kill a blabctl child left over from a previous bridge process — but only
+ * after verifying the persisted pid still belongs to that run. PIDs get
+ * recycled by the OS, so we require the live process's command line to
+ * mention both blabctl and this run's id (its --out run directory) before
+ * touching it. Synchronous on purpose: runs during loadStore, before the
+ * server starts accepting jobs.
+ */
+function killVerifiedOrphan(run: Run) {
+  if (!run.pid) return;
+  const cmdline = processCommandLine(run.pid);
+  if (cmdline === null) return; // process already gone
+  if (!(/blabctl/i.test(cmdline) && cmdline.includes(run.id))) {
+    console.warn(
+      `[bridge] pid ${run.pid} recorded for run ${run.id} now belongs to another process; leaving it alone`,
+    );
+    return;
+  }
+  console.warn(`[bridge] reaping orphaned job process ${run.pid} (run ${run.id})`);
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/F", "/T", "/PID", String(run.pid)], {
+      stdio: "ignore",
+      timeout: 15_000,
+      windowsHide: true,
+    });
+  } else {
+    // Children are spawned detached (own process group) — kill the group so
+    // Julia grandchildren die too, then the leader in case the group is gone.
+    try {
+      process.kill(-run.pid, "SIGKILL");
+    } catch {
+      /* group already gone */
+    }
+    try {
+      process.kill(run.pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 // ---------- persistence (debounced) ----------
@@ -172,6 +259,22 @@ export function markRunning(id: string) {
   run.status = "running";
   run.startedAt = now();
   persist();
+  changed(id);
+}
+
+/** Record (or clear) the live child pid. Persists immediately — the pid must
+ *  be on disk before the child does real work, or a crash right after spawn
+ *  would leave an untracked orphan. */
+export function setRunPid(id: string, pid: number | undefined) {
+  const run = getRun(id);
+  if (!run) return;
+  if (pid === undefined) delete run.pid;
+  else run.pid = pid;
+  try {
+    persistNow();
+  } catch (err) {
+    console.error(`[bridge] failed to persist pid for run ${id}: ${err}`);
+  }
   changed(id);
 }
 

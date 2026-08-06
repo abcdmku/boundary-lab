@@ -14,11 +14,28 @@ import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
+import * as queue from "./queue.ts";
 import * as actions from "./actions.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
 
 store.loadStore();
+
+// Graceful shutdown: kill active blabctl/Julia trees before exiting so a
+// service-manager restart never leaves an orphan solve holding the GPU.
+let shuttingDown = false;
+const shutdown = (signal: NodeJS.Signals) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[bridge] ${signal}: terminating active jobs, then exiting`);
+  queue.shutdownAll(`bridge shutdown (${signal})`);
+  // Short grace so kill + state persistence land, then exit (the store's
+  // process 'exit' hook does a final synchronous persist).
+  setTimeout(() => process.exit(0), 1500);
+};
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
 const app = express();
 app.use(express.json({ limit: "4mb" }));
 
