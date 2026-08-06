@@ -235,7 +235,11 @@ SCHEMA = {
                 "default": 64,
                 "minimum": 16,
                 "maximum": 256,
-                "description": "Full-circumference segment count; each quadrant outline uses angular_segments/4 segments.",
+                "multipleOf": 4,
+                "description": (
+                    "Full-circumference segment count; must be a multiple of 4 (the mesh is built per "
+                    "quadrant with angular_segments/4 segments)."
+                ),
             },
             "adapter_segments": {
                 "type": "integer",
@@ -321,6 +325,10 @@ def _derive(p: dict) -> dict:
         raise ValueError(f"back must be 'shell' or 'enclosure', got {p['back']!r}")
     if int(p["angular_segments"]) < 8:
         raise ValueError(f"angular_segments must be >= 8, got {p['angular_segments']!r}")
+    if int(p["angular_segments"]) % 4 != 0:
+        raise ValueError(
+            f"angular_segments must be a multiple of 4 (the mesh is built per quadrant), got {p['angular_segments']!r}"
+        )
     for name in ("adapter_segments", "flare_segments", "plug_segments", "roundover_segments"):
         if int(p[name]) < 2:
             raise ValueError(f"{name} must be >= 2, got {p[name]!r}")

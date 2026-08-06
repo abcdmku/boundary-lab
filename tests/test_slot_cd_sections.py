@@ -253,6 +253,10 @@ class TestValidation:
         # mouth_roundover is ignored for back='enclosure', so no error.
         horn.build_quadrant({"back": "enclosure", "mouth_roundover": 4})
 
+    def test_angular_segments_must_be_multiple_of_four(self):
+        with pytest.raises(ValueError, match="angular_segments must be a multiple of 4"):
+            horn.build_quadrant({"angular_segments": 19})
+
     def test_slices_cutting_throat(self):
         with pytest.raises(ValueError, match="slice planes cut into the throat rim"):
             horn.build_quadrant({"slice_angle_deg": 10, "slot_width": 6, "slot_length": 80, "wall_angle_deg": 20})
