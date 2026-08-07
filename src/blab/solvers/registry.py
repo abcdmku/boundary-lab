@@ -28,7 +28,14 @@ _BACKENDS: dict[str, SolverBackendInfo] = {
             is_remote=True,
         ),
         factory=lambda **kwargs: _create_bempp_server_backend(**kwargs),
-        description="Use a Boundary Lab HTTP solve server.",
+        # supports_symmetry is False here because this entry describes the
+        # protocol, not the far end. What a given server can actually compute is
+        # read from its GET /health payload at session-creation time; see
+        # blab.solvers.http_server.HttpServerBackend.effective_capabilities.
+        description=(
+            "Use a Boundary Lab HTTP solve server, local or remote. "
+            "Pass server_url=... to create_backend; defaults to http://127.0.0.1:8765."
+        ),
     ),
     "beat_cuda": SolverBackendInfo(
         backend_id="beat_cuda",
@@ -139,14 +146,42 @@ def _create_bempp_local_backend() -> SolverBackend:
     return BemppLocalBackend()
 
 
-def _create_bempp_server_backend(*, server_url: str = "http://127.0.0.1:8765", **_kwargs: Any) -> SolverBackend:
-    return _create_http_server_backend(server_url=server_url)
+def _create_bempp_server_backend(*, server_url: str | None = None, **kwargs: Any) -> SolverBackend:
+    return _create_http_server_backend(server_url=server_url, **kwargs)
 
 
-def _create_http_server_backend(*, server_url: str = "http://127.0.0.1:8765", **_kwargs: Any) -> SolverBackend:
-    from blab.solvers.http_server import HttpServerBackend
+def _create_http_server_backend(
+    *,
+    server_url: str | None = None,
+    server_auth_token: str | None = None,
+    server_request_timeout_s: float | None = None,
+    server_health_timeout_s: float | None = None,
+    server_stream_idle_timeout_s: float | None = None,
+    server_stream_retries: int | None = None,
+    **_kwargs: Any,
+) -> SolverBackend:
+    from blab.solvers.http_server import (
+        DEFAULT_HEALTH_TIMEOUT_S,
+        DEFAULT_REQUEST_TIMEOUT_S,
+        DEFAULT_SERVER_URL,
+        DEFAULT_STREAM_IDLE_TIMEOUT_S,
+        DEFAULT_STREAM_RETRIES,
+        HttpServerBackend,
+    )
 
-    return HttpServerBackend(server_url)
+    # An unset URL keeps the historical localhost default; an explicitly bad one
+    # raises from normalize_server_url inside the backend rather than silently
+    # falling back to a machine the caller did not mean.
+    return HttpServerBackend(
+        server_url or DEFAULT_SERVER_URL,
+        auth_token=server_auth_token,
+        request_timeout_s=DEFAULT_REQUEST_TIMEOUT_S if server_request_timeout_s is None else server_request_timeout_s,
+        health_timeout_s=DEFAULT_HEALTH_TIMEOUT_S if server_health_timeout_s is None else server_health_timeout_s,
+        stream_idle_timeout_s=(
+            DEFAULT_STREAM_IDLE_TIMEOUT_S if server_stream_idle_timeout_s is None else server_stream_idle_timeout_s
+        ),
+        stream_retries=DEFAULT_STREAM_RETRIES if server_stream_retries is None else server_stream_retries,
+    )
 
 
 def _create_beat_engine_backend(

@@ -55,6 +55,42 @@ def progress(stage: str, message: str, done: int | None = None, total: int | Non
     emit(event)
 
 
+def server_url_arg(value: str) -> str:
+    """argparse type for --server-url: reject a bad URL before any work starts."""
+    from blab.solvers.http_server import normalize_server_url
+
+    try:
+        return normalize_server_url(value, default=None)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def resolve_server_url(cli_value: str | None) -> str:
+    """The solve server to talk to: --server-url, else BLAB_SERVER_URL, else localhost."""
+    from blab.solvers.http_server import DEFAULT_SERVER_URL, normalize_server_url
+
+    if cli_value:
+        return normalize_server_url(cli_value, default=None)
+    env_value = os.environ.get("BLAB_SERVER_URL", "").strip()
+    if env_value:
+        return normalize_server_url(env_value, default=None)
+    return DEFAULT_SERVER_URL
+
+
+def resolve_server_token(cli_value: str | None) -> str | None:
+    return (cli_value or os.environ.get("BLAB_SERVER_TOKEN", "")).strip() or None
+
+
+def probe_server_health(server_url: str, *, timeout_s: float, auth_token: str | None) -> dict:
+    """GET /health, or raise with a message that names the URL that failed."""
+    from blab.solvers.http_server import query_server_health
+
+    try:
+        return query_server_health(server_url, timeout_s=timeout_s, auth_token=auth_token)
+    except Exception as exc:
+        raise RuntimeError(f"Solve server at {server_url} is not reachable: {type(exc).__name__}: {exc}") from exc
+
+
 def resolve_julia_exe(cli_value: str | None) -> str:
     if cli_value:
         return cli_value
@@ -257,13 +293,43 @@ def cmd_solve(args: argparse.Namespace) -> dict:
     backend_id = normalize_backend_id(args.backend)
     julia_exe = resolve_julia_exe(args.julia_exe)
     backend_kwargs = {}
+    server_url = None
+    server_health = None
     if backend_id.startswith("beat_"):
         backend_kwargs = {"julia_executable": julia_exe, "persistent_worker": False}
+    elif backend_id == "server":
+        server_url = resolve_server_url(args.server_url)
+        backend_kwargs = {
+            "server_url": server_url,
+            "server_auth_token": resolve_server_token(args.server_token),
+            "server_health_timeout_s": args.server_timeout,
+            "server_request_timeout_s": max(args.server_timeout, 30.0),
+        }
+        # Probe once, up front. The far end's /health is the only authority on
+        # what it can do: whether a symmetry-reduced mesh is safe to send, and
+        # how much VRAM the box that will actually run this has. Failing here
+        # beats failing after uploading a 200 MB mesh.
+        server_health = probe_server_health(
+            server_url,
+            timeout_s=args.server_timeout,
+            auth_token=resolve_server_token(args.server_token),
+        )
+        from blab.solvers.http_server import server_health_summary, server_health_supports_symmetry
+
+        progress("solve", f"Solve server {server_url}: {server_health_summary(server_health)}")
+        if symmetry != "off" and not server_health_supports_symmetry(server_health):
+            raise RuntimeError(
+                f"symmetry='{symmetry}' needs a solve server that reconstructs the mirrored domain, but "
+                f"{server_url} does not advertise symmetry support ({server_health_summary(server_health)}). "
+                "Sending it the reduced mesh would produce wrong pressures. Use --symmetry off, or point "
+                "--server-url at a server started with --solver beat_cuda / beat_cpu."
+            )
     backend = create_backend(backend_id, **backend_kwargs)
 
     # Capacity check, never a gate: estimate peak VRAM for the mesh actually
-    # handed to the solver (post symmetry reduction) and warn if the local GPU
-    # cannot hold it. Remote/CPU backends and undetectable GPUs never block.
+    # handed to the solver (post symmetry reduction) and warn if the GPU that
+    # will run it cannot hold it -- the local card for beat_*, the server's card
+    # (from /health) for `server`. CPU backends and unknown GPUs never block.
     import vram as vram_mod
     from generators import mesh_dof_counts
 
@@ -276,6 +342,7 @@ def cmd_solve(args: argparse.Namespace) -> dict:
         vertices=solver_vertices,
         backend_id=backend_id,
         symmetry=symmetry,
+        remote_health=server_health,
     )
     progress(
         "solve",
@@ -366,10 +433,84 @@ def cmd_solve(args: argparse.Namespace) -> dict:
             "symmetry": symmetry,
             "freq_min_hz": float(args.fmin),
             "freq_max_hz": float(args.fmax),
+            "server_url": server_url,
+            "server_solver": (server_health or {}).get("backend"),
         },
     }
     (out_dir / "result.json").write_text(json.dumps({"ok": True, **result}, indent=2), encoding="utf-8")
     return result
+
+
+def cmd_remote_check(args: argparse.Namespace) -> dict:
+    """Preflight a solve server: reachability, solver, capabilities, GPU.
+
+    This is the command to run before pointing a campaign at a remote box. It
+    answers the two questions that decide whether a solve will work there --
+    "will it accept a symmetry-reduced mesh" and "will the mesh fit in its
+    VRAM" -- without submitting anything.
+    """
+    import vram as vram_mod
+
+    from blab.solvers.http_server import (
+        server_health_backend_id,
+        server_health_capabilities,
+        server_health_supports_symmetry,
+    )
+
+    server_url = resolve_server_url(args.server_url)
+    auth_token = resolve_server_token(args.server_token)
+    progress("remote-check", f"Probing {server_url}/health")
+
+    started = time.perf_counter()
+    health = probe_server_health(server_url, timeout_s=args.server_timeout, auth_token=auth_token)
+    latency_ms = round((time.perf_counter() - started) * 1000.0, 1)
+
+    capabilities = server_health_capabilities(health)
+    backend = server_health_backend_id(health)
+    supports_symmetry = server_health_supports_symmetry(health)
+    uses_gpu = vram_mod.remote_health_uses_gpu(health)
+    gpu = vram_mod.remote_gpu_from_health(health)
+
+    progress(
+        "remote-check",
+        f"{server_url} reachable in {latency_ms:.1f} ms: solver={backend or 'unknown'}, "
+        f"symmetry={'yes' if supports_symmetry else 'no'}, "
+        f"gpu={gpu['name'] if gpu else ('not reported' if uses_gpu else 'not used')}",
+    )
+    if uses_gpu and gpu is None:
+        emit(
+            {
+                "event": "warning",
+                "stage": "remote-check",
+                "message": (
+                    f"{server_url} runs a GPU solver ({backend or 'unknown'}) but does not report GPU details, "
+                    "so solve-time VRAM estimates cannot be checked against it. Upgrade the server to a build "
+                    "that reports `gpu` in /health."
+                ),
+            }
+        )
+
+    return {
+        "server_url": server_url,
+        "reachable": True,
+        "latency_ms": latency_ms,
+        "status": str(health.get("status") or ""),
+        "solver": str(health.get("solver") or ""),
+        "backend": backend,
+        "solver_label": str(health.get("solver_label") or ""),
+        "supports_symmetry": supports_symmetry,
+        "solver_uses_gpu": uses_gpu,
+        "capabilities": capabilities,
+        "gpu": gpu,
+        "gpu_human": {
+            "name": gpu.get("name"),
+            "total": vram_mod.format_bytes(gpu.get("total_bytes")),
+            "free": vram_mod.format_bytes(gpu.get("free_bytes")),
+        }
+        if gpu
+        else None,
+        "health": health,
+    }
 
 
 def _derive_mesh_result(solve_run: Path) -> dict | None:
@@ -435,6 +576,33 @@ def cmd_score(args: argparse.Namespace) -> dict:
     return result
 
 
+def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--server-url",
+        type=server_url_arg,
+        default=None,
+        help=(
+            "Boundary Lab solve server, e.g. http://10.0.0.5:8765 for a remote box. "
+            "Only used with --backend server. Defaults to the BLAB_SERVER_URL env var, "
+            "or http://127.0.0.1:8765 (a server on this machine) when neither is set."
+        ),
+    )
+    parser.add_argument(
+        "--server-token",
+        default=None,
+        help=(
+            "Bearer token sent as an Authorization header (default: BLAB_SERVER_TOKEN env). "
+            "For a reverse proxy or tunnel fronting the server; blab server itself does not authenticate."
+        ),
+    )
+    parser.add_argument(
+        "--server-timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for the server's /health probe (default: 10).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blabctl", description="NDJSON bridge CLI for Boundary Lab.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -453,11 +621,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_solve.add_argument("--fmin", type=float, default=200.0)
     p_solve.add_argument("--fmax", type=float, default=20000.0)
     p_solve.add_argument("--count", type=int, default=24)
-    p_solve.add_argument("--backend", default="beat_cuda")
+    p_solve.add_argument(
+        "--backend",
+        default="beat_cuda",
+        help="Solver backend: beat_cuda, beat_cpu, beat_rocm, local, or server (remote HTTP solve server)",
+    )
     p_solve.add_argument("--symmetry", choices=("off", "x", "xy"), default="off")
     p_solve.add_argument(
         "--julia-exe", default=None, help="Julia executable (default: BLAB_JULIA_EXE env or known install)"
     )
+    _add_server_arguments(p_solve)
+
+    p_remote_check = sub.add_parser(
+        "remote-check",
+        help="Probe a solve server's /health and report solver, capabilities and GPU.",
+    )
+    _add_server_arguments(p_remote_check)
 
     p_score = sub.add_parser("score", help="Score a completed solve run against an objective spec.")
     p_score.add_argument("--solve-run", required=True, help="Directory containing result.json from solve")
@@ -480,6 +659,7 @@ COMMANDS = {
     "solve": cmd_solve,
     "score": cmd_score,
     "preview": cmd_preview,
+    "remote-check": cmd_remote_check,
 }
 
 
