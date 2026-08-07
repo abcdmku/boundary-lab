@@ -19,6 +19,7 @@ import * as actions from "./actions.ts";
 import * as t3 from "./t3.ts";
 import { generatorsCache, compactGenerators } from "./generators.ts";
 import { resolveWorkspace, shellSnapshot } from "./threads.ts";
+import * as vastRegistry from "./vast/registry.ts";
 
 const workspaceArg = z
   .string()
@@ -186,7 +187,8 @@ export function buildMcpServer(): McpServer {
       "later with get_run. Results include artifact URLs viewable in a browser. A `vram` field " +
       "reports the estimated peak GPU memory and warns (never blocks) if it exceeds the local " +
       "GPU's VRAM; the authoritative check re-runs when the solve starts and lands in the run " +
-      "summary as `vram_warning`.",
+      "summary as `vram_warning`. Pass `target` to run on a rented cloud GPU instead — the VRAM " +
+      "note is then omitted, since the remote card's memory is what matters.",
     {
       mesh_run_id: z.string().describe("Run id of a completed mesh run (kind 'mesh', status 'done')."),
       fmin: z.number().optional().describe("Lowest frequency in Hz."),
@@ -195,11 +197,19 @@ export function buildMcpServer(): McpServer {
       backend: z.string().optional().describe("Solver backend, e.g. 'julia_local'."),
       symmetry: z.string().optional().describe("Symmetry plane spec passed to the solver."),
       name: z.string().optional().describe("Human-readable run name."),
+      target: z
+        .string()
+        .optional()
+        .describe(
+          "Where to run: 'local' (default, this machine's GPU) or 'vast:<instanceId>' for a rented " +
+            "cloud GPU. List available targets with list_compute_targets. A vast target must already " +
+            "be provisioned and healthy; renting one costs money and is never automatic.",
+        ),
       workspace: workspaceArg,
     },
-    async ({ mesh_run_id, fmin, fmax, count, backend, symmetry, name, workspace }) => {
+    async ({ mesh_run_id, fmin, fmax, count, backend, symmetry, name, target, workspace }) => {
       const ctx = await resolveThreadId(workspace);
-      const options = { fmin, fmax, count, backend, symmetry };
+      const options = { fmin, fmax, count, backend, symmetry, target };
       // Read the estimate before queueing: startSolve may outlive this call.
       const vramNote = actions.solveVramNote(mesh_run_id, options);
       let run: store.Run;
@@ -237,6 +247,35 @@ export function buildMcpServer(): McpServer {
       const run = store.getRun(run_id);
       if (!run) return text(`unknown run ${run_id} — call list_runs for valid ids`);
       return text({ ...runReport(run), queuePosition: queue.queuePosition(run.id) || undefined });
+    },
+  );
+
+  server.tool(
+    "list_compute_targets",
+    "List the machines a solve can run on: the local GPU, plus any rented vast.ai instances this " +
+      "bridge manages. Pass a target's id as `solve`'s `target` argument. Only targets with " +
+      "available=true can actually take work — the rest show why not (not provisioned, unhealthy, " +
+      "stopped). This tool is READ-ONLY and free; renting a GPU costs money, is never automatic, " +
+      "and is done through the dashboard or the /api/vast HTTP API with an explicit confirmation.",
+    { workspace: workspaceArg },
+    async () => {
+      const instances = vastRegistry.list().filter((entry) => entry.status !== "destroyed");
+      return text({
+        targets: [
+          { id: "local", label: "Local GPU", available: true, pricePerHour: 0 },
+          ...instances.map((entry) => ({
+            id: `vast:${entry.id}`,
+            label: `${entry.gpuName}${entry.numGpus > 1 ? ` x${entry.numGpus}` : ""} — ${entry.label}`,
+            available: entry.status === "ready" && entry.serverUrl !== null && entry.lastHealth?.ok === true,
+            status: entry.status,
+            pricePerHour: entry.live?.pricePerHour ?? entry.pricePerHour,
+            ...(entry.error ? { error: entry.error } : {}),
+          })),
+        ],
+        // Surfaced so an agent can see, and report, that money is being spent.
+        activeBurnRatePerHour: Number(vastRegistry.activeBurnRatePerHour().toFixed(4)),
+        ui: `${config.publicUrl}/`,
+      });
     },
   );
 

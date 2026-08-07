@@ -1,0 +1,55 @@
+{
+  "success": true,
+  "instances_found": 2,
+  "total_instances": 2,
+  "next_token": null,
+  "instances": [
+    {
+      "id": 20250806,
+      "machine_id": 4455,
+      "label": "boundary-lab-solver",
+      "gpu_name": "RTX 4090",
+      "num_gpus": 1,
+      "gpu_ram": 24564,
+      "disk_space": 60.0,
+      "image_uuid": "nvidia/cuda:12.6.3-runtime-ubuntu24.04",
+      "image_runtype": "ssh ssh_direc ssh_proxy",
+      "actual_status": "running",
+      "intended_status": "running",
+      "cur_state": "running",
+      "status_msg": "success, running",
+      "dph_total": 0.3421,
+      "storage_cost": 0.0082,
+      "start_date": 1754400000.0,
+      "ssh_host": "ssh2281.vast.ai",
+      "ssh_port": 10882,
+      "public_ipaddr": "65.130.162.74",
+      "ports": {
+        "22/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "33525" }],
+        "8765/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "33526" }]
+      },
+      "geolocation": "Washington, US"
+    },
+    {
+      "id": 20250807,
+      "machine_id": 7788,
+      "label": "old-experiment",
+      "gpu_name": "RTX 3090",
+      "num_gpus": 1,
+      "gpu_ram": 24576,
+      "disk_space": 40.0,
+      "actual_status": "stopped",
+      "intended_status": "stopped",
+      "cur_state": "stopped",
+      "status_msg": null,
+      "dph_total": 0.18,
+      "storage_cost": 0.0055,
+      "start_date": 1754300000.0,
+      "ssh_host": "ssh4102.vast.ai",
+      "ssh_port": 21044,
+      "public_ipaddr": "51.20.11.9",
+      "ports": null,
+      "geolocation": "Stockholm, SE"
+    }
+  ]
+}

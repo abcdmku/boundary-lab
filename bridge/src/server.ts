@@ -18,6 +18,7 @@ import * as queue from "./queue.ts";
 import * as actions from "./actions.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
+import { vastRouter } from "./vast/routes.ts";
 
 store.loadStore();
 
@@ -81,7 +82,7 @@ app.post("/api/generate", (req, res) => {
 });
 
 app.post("/api/solve", (req, res) => {
-  const { meshRunId, name, fmin, fmax, count, backend, symmetry } = req.body ?? {};
+  const { meshRunId, name, fmin, fmax, count, backend, symmetry, target } = req.body ?? {};
   if (typeof meshRunId !== "string") return fail(res, new actions.ActionError("meshRunId (string) is required"));
   const num = (v: unknown, label: string): number | undefined => {
     if (v === undefined || v === null) return undefined;
@@ -100,6 +101,8 @@ app.post("/api/solve", (req, res) => {
           count: num(count, "count"),
           backend: typeof backend === "string" ? backend : undefined,
           symmetry: typeof symmetry === "string" ? symmetry : undefined,
+          // "local" (default), "vast:<instanceId>", or an explicit server URL.
+          target: typeof target === "string" ? target : undefined,
         },
       }),
     );
@@ -154,6 +157,9 @@ app.get("/api/events", (req, res) => {
   store.emitter.on("change", onChange);
   req.on("close", () => store.emitter.off("change", onChange));
 });
+
+// ---------- compute providers: rented vast.ai GPUs ----------
+app.use("/api/vast", vastRouter);
 
 // ---------- artifacts: files from a run's directory ----------
 app.get("/artifacts/:runId/*", (req, res) => {

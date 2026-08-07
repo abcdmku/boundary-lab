@@ -8,6 +8,8 @@ import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
 import { generatorsCache, getGenerator } from "./generators.ts";
+import * as vastRegistry from "./vast/registry.ts";
+import { describeKey as describeVastKey } from "./vast/key.ts";
 
 export class ActionError extends Error {
   constructor(
@@ -24,6 +26,63 @@ export interface SolveOptions {
   count?: number;
   backend?: string;
   symmetry?: string;
+  /**
+   * Where to run: "local" (default), "vast:<instanceId>" for a managed rented
+   * GPU, or an explicit http(s) URL of any reachable `blab server`.
+   * See resolveSolveTarget.
+   */
+  target?: string;
+}
+
+export interface ResolvedTarget {
+  id: string;
+  kind: "local" | "vast" | "url";
+  /** null for local; the base URL of a remote `blab server` otherwise. */
+  serverUrl: string | null;
+}
+
+/**
+ * Turn a target id into something the solve can actually be dispatched to.
+ *
+ * A remote target must be provably usable before a run is queued — a solve
+ * that fails an hour later because the box was never provisioned is far worse
+ * than an immediate, explanatory refusal. For a managed vast instance that
+ * means: in the registry, status "ready", a known server URL, and a passing
+ * health check. The bare-URL form is the escape hatch for a `blab server`
+ * this bridge does not manage, and is taken on trust.
+ */
+export function resolveSolveTarget(target?: string): ResolvedTarget {
+  const requested = (target ?? "local").trim();
+  if (requested === "" || requested.toLowerCase() === "local")
+    return { id: "local", kind: "local", serverUrl: null };
+
+  if (/^https?:\/\//i.test(requested))
+    return { id: requested, kind: "url", serverUrl: requested.replace(/\/$/, "") };
+
+  const vastMatch = /^vast:(\d+)$/.exec(requested);
+  if (!vastMatch)
+    throw new ActionError(
+      `unknown solve target "${requested}" — expected "local", "vast:<instanceId>", or an http(s) URL`,
+    );
+
+  const instanceId = Number(vastMatch[1]);
+  const instance = vastRegistry.get(instanceId);
+  if (!instance)
+    throw new ActionError(`vast instance ${instanceId} is not managed by this bridge`, 404);
+  if (instance.status !== "ready" || !instance.serverUrl)
+    throw new ActionError(
+      `vast instance ${instanceId} is "${instance.status}", not ready — provision it first ` +
+        `(POST /api/vast/instances/${instanceId}/provision)`,
+      409,
+    );
+  if (instance.lastHealth?.ok !== true)
+    throw new ActionError(
+      `vast instance ${instanceId} has not passed a health check` +
+        `${instance.lastHealth?.error ? ` (last error: ${instance.lastHealth.error})` : ""} — ` +
+        `re-check it with POST /api/vast/instances/${instanceId}/health`,
+      409,
+    );
+  return { id: requested, kind: "vast", serverUrl: instance.serverUrl };
 }
 
 export function startGenerate(input: {
@@ -68,6 +127,9 @@ export function startSolve(input: {
   if (mesh.status !== "done")
     throw new ActionError(`mesh run ${input.meshRunId} is ${mesh.status}, not done`);
   const opts = input.options ?? {};
+  // Resolve before creating the run: an unusable target must fail the request,
+  // not leave a queued run that dies on dispatch.
+  const target = resolveSolveTarget(opts.target);
   const run = store.createRun({
     kind: "solve",
     name: input.name?.trim() || `solve ${mesh.name}`,
@@ -76,8 +138,11 @@ export function startSolve(input: {
       ...(opts.fmin !== undefined ? { fmin: opts.fmin } : {}),
       ...(opts.fmax !== undefined ? { fmax: opts.fmax } : {}),
       ...(opts.count !== undefined ? { count: opts.count } : {}),
-      ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+      // A remote solve is dispatched with --backend server, so the caller's
+      // backend choice belongs to the server and is not passed through here.
+      ...(opts.backend !== undefined && target.kind === "local" ? { backend: opts.backend } : {}),
       ...(opts.symmetry !== undefined ? { symmetry: opts.symmetry } : {}),
+      ...(target.kind === "local" ? {} : { target: target.id, serverUrl: target.serverUrl }),
     },
     parentRunId: input.meshRunId,
     ...(input.workspace ? { workspace: input.workspace } : {}),
@@ -120,6 +185,10 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
  * size is a hardware-capacity question, never a reason to refuse work.
  */
 export function solveVramNote(meshRunId: string, options?: SolveOptions): string | null {
+  // A remote solve consumes the RENTED box's VRAM, not this machine's, so a
+  // note about local capacity would be actively misleading.
+  const requestedTarget = (options?.target ?? "local").trim().toLowerCase();
+  if (requestedTarget !== "" && requestedTarget !== "local") return null;
   const backend = (options?.backend ?? "beat_cuda").trim().toLowerCase();
   if (!LOCAL_GPU_BACKEND_ALIASES.has(backend)) return null;
 
@@ -260,6 +329,7 @@ export function rescanRun(id: string): store.Run {
 
 export function fullState() {
   const gens = generatorsCache();
+  const vastKey = describeVastKey();
   return {
     generators: gens.generators,
     generatorsError: gens.error ?? null,
@@ -267,5 +337,17 @@ export function fullState() {
     queue: queue.queueSnapshot(),
     t3: { configured: t3Configured() },
     publicUrl: config.publicUrl,
+    /**
+     * Rented compute. Cached registry state only — this is the SSE snapshot
+     * path and must never make an upstream call. Use GET /api/vast/instances
+     * to refresh against vast.ai. The key itself is never included, only
+     * whether one is configured and where it came from.
+     */
+    vast: {
+      configured: vastKey.configured,
+      keySource: vastKey.source,
+      instances: vastRegistry.list(),
+      activeBurnRatePerHour: Number(vastRegistry.activeBurnRatePerHour().toFixed(4)),
+    },
   };
 }
