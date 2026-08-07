@@ -299,7 +299,12 @@ Notes:
   `estimated_bbox_mm` the generator reports, in milliseconds and without a job.
 - `mesh_verify_params` are resolution-only parameter overrides (names must come from the
   generator's schema) applied on top of the champion's params for the verification trial
-  — they must refine the mesh, never change geometry.
+  — they must refine the mesh, never change geometry. The trial-runner treats them as a
+  **floor**: an override that would make the mesh coarser than the champion's own value
+  is ignored in favour of the champion's (see `trial-runner.md`), so a fixed value here
+  can never produce a verification coarser than the trial it is confirming. Set them
+  comfortably finer than the baseline resolution anyway — the example's
+  `angular_segments: 96` refines the generator's default of 64.
   Set `verify_max_triangles` as high as the verify budget allows: generation imposes no
   size limit of its own. The one hardware constraint is GPU memory, and it is advisory —
   `generate` reports an estimated peak VRAM per symmetry option and `solve` warns

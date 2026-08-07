@@ -123,6 +123,15 @@ Use real horn acoustics, not blind parameter search:
   champion. Shrink steps when moves stop paying (two consecutive non-improvements on an
   axis → halve the step or switch axis); record the axis and step in your hypothesis so
   your next invocation can reconstruct the state from `log.md`.
+- **Hold the mesh-resolution parameters fixed.** Some schema parameters set mesh density
+  rather than shape (for `slot_cd_horn`: `angular_segments`, `adapter_segments`,
+  `flare_segments`, `plug_segments`, `roundover_segments`, `outer_coarsen`). Pick one
+  baseline — the generator defaults unless the spec says otherwise — and use it for
+  **every** trial. Varying them makes scores incomparable (you would be reading solver
+  convergence as if it were acoustics), moves trials across the triangle gates for no
+  design reason, and collides with the verification trial, whose `mesh_verify_params`
+  exist precisely to raise resolution once, at the end, on the champion. Resolution is
+  the orchestrator's axis, not yours.
 - **Failures are information.** `score: null` trials mark infeasible regions (too many
   triangles, mesh quality, solver failure). Steer proposals away from — but near — those
   boundaries. Never re-propose params materially identical (within ~1% per parameter) to

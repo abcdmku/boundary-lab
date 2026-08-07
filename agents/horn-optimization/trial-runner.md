@@ -16,8 +16,18 @@ Preflight: confirm `spec.json` exists and that `trials.jsonl` (if present) does 
 already contain a line for this trial number — if it does, stop and report instead of
 writing a duplicate. For `verify` trials: overlay `spec.mesh_verify_params` (if present)
 onto the given params before generating — these are resolution-only generator parameters
-(e.g. an element-size override) that refine the mesh without touching the champion's
-geometry. Generation never refuses a mesh for its size, so a verify mesh may be as fine
+that refine the mesh without touching the champion's geometry.
+
+**The overlay is a floor, not a replacement.** Apply each override only where it makes the
+mesh *finer* than the champion's own value; if the champion is already finer on that
+parameter, keep the champion's value. For segment/subdivision counts (`angular_segments`,
+`*_segments` — higher is finer) that means `max(champion, override)`; for a
+spacing-style parameter (element size — lower is finer) it means `min(champion, override)`;
+for `outer_coarsen` (higher is coarser) it means `min(champion, override)`. Read the
+parameter's schema `description` if the direction is not obvious. A verification that
+came out coarser than the trial it is confirming proves nothing, and can even fail the
+`min_triangles` floor. Note in the trial `note` whenever you kept a champion value in
+preference to an override. Generation never refuses a mesh for its size, so a verify mesh may be as fine
 as the spec's verify gates allow; the `generate` result carries a `vramEstimate` per
 symmetry option, and `solve` warns (never blocks) if that estimate exceeds the local
 GPU's VRAM. Use `spec.solve_verify` instead of `spec.solve`,
