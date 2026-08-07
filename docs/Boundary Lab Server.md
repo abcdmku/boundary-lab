@@ -48,7 +48,89 @@ In the Boundary Lab GUI:
 
 `Check Server` calls `GET /health` and updates the application's view of server-advertised capabilities. This matters for features such as BEAT Engine server-side X/XY symmetry. If Boundary Lab starts with `BEM Solver` already set to `Server`, it also runs a silent startup `GET /health` probe with a 5 second timeout. Failed startup probes do not interrupt application launch; the GUI simply falls back to the conservative unavailable state until a later successful check.
 
+## Remote Solves From The Bridge CLI
+
+`bridge/py/blabctl.py` can send a solve to a server on another machine. Point it
+at the server and the rest of the workflow is unchanged:
+
+```bash
+python bridge/py/blabctl.py remote-check --server-url http://10.0.0.5:8765
+python bridge/py/blabctl.py solve --mesh-run runs/mesh --out runs/solve \
+  --backend server --server-url http://10.0.0.5:8765
+```
+
+- `--server-url` accepts `http://` or `https://` with an optional port and base
+  path. It is validated at argument-parse time, so a typo fails immediately
+  rather than after a mesh upload. Credentials embedded in the URL are rejected.
+- Without `--server-url`, the `BLAB_SERVER_URL` environment variable is used,
+  and failing that `http://127.0.0.1:8765` — a server on this machine.
+- `--server-token` (or `BLAB_SERVER_TOKEN`) sends an `Authorization: Bearer`
+  header on every request. `blab server` itself does not authenticate; this is
+  for a reverse proxy or tunnel fronting it, which is the usual arrangement for
+  a rented GPU box.
+- `--server-timeout` bounds the `/health` probe (default 10 s).
+
+`remote-check` probes `GET /health` and emits one NDJSON result line with the
+server's solver, capability flags, `supports_symmetry`, and GPU name plus
+total/free VRAM when the server reports one. Run it before pointing a campaign
+at a new machine. An unreachable server produces `{"event":"result","ok":false,
+"error":"... is not reachable: ..."}` and exit code 1.
+
+`solve --backend server` probes `/health` once up front and uses it for two
+decisions: whether a symmetry-reduced mesh may be submitted (see below), and
+which GPU the solve's estimated peak VRAM is compared against. For a remote
+solve that comparison is made against the *server's* card, not the client's;
+as everywhere else in Boundary Lab, an over-capacity estimate warns and the
+solve proceeds.
+
+## Long-Running And Interrupted Solves
+
+The event stream is designed to survive a broken link, which matters once the
+server is a machine on the other side of the internet:
+
+- The server writes a `heartbeat` event roughly every 15 seconds while a job is
+  idle. Heartbeats are not stored events and carry no index, so they never
+  affect a client's resume point. Clients that do not recognise the type ignore
+  it.
+- The client reads with a 120 second idle timeout. On a timeout, reset, or early
+  close it reconnects with `GET /jobs/{id}/events?since=<next index>`, which
+  replays the stored event log from exactly where it left off — no results are
+  lost and the job is never resubmitted. It gives up after 5 fruitless attempts,
+  reporting the job id so the job can be inspected or cancelled by hand. A
+  reconnect that does deliver events resets the budget.
+- Cancellation works the same locally and remotely: `POST /jobs/{id}/cancel` is
+  sent once per stop request, and retried on the next pass if that POST failed.
+- `POST /jobs` gets its own, far longer timeout (30 minutes) than the small
+  control endpoints (30 seconds). It carries the whole mesh base64-inlined and
+  the server decodes and writes it before replying, so a large mesh over a
+  domestic uplink takes minutes; timing out there is expensive, because the
+  server may already have accepted the job.
+
+## GPU Reporting And Multi-GPU Servers
+
+The `gpu` block in `/health` describes the card the *solver* will use, not
+simply physical GPU 0. On a multi-GPU machine `CUDA_VISIBLE_DEVICES` decides
+where the solve lands, so the server resolves its first entry — an index, or a
+`GPU-`/`MIG-` UUID — against `nvidia-smi` and reports that device, including its
+`index` and `uuid`. If the variable is empty, or names a device `nvidia-smi`
+does not list, `gpu` is `null`: reporting the wrong card would suppress a real
+out-of-memory warning on a smaller GPU, or invent one on a larger.
+
 ## Symmetry Support
+
+Symmetry is negotiated with the server, not assumed from the client's backend
+table. The `server` backend's static registry entry reports no symmetry support
+because it describes the protocol, not the far end; what a particular server can
+compute is read from its `/health` payload at session-creation time and that
+probe is authoritative.
+
+A symmetry-reduced mesh is the fundamental domain, not the whole radiator, so
+sending one to a server that will not reconstruct the reflections produces
+plausible-looking but wrong pressures. Boundary Lab therefore submits a reduced
+mesh only after `/health` affirmatively advertises
+`capabilities.supports_symmetry` in that probe. An unreachable or silent server
+is treated as "no", and the solve fails with an explanatory error rather than
+proceeding.
 
 Server-side symmetry depends on the configured server solver:
 
@@ -64,7 +146,7 @@ For symmetry solves, the GUI still prepares and uploads the reduced-domain mesh 
 
 The server exposes a small HTTP API:
 
-- `GET /health`: returns status, configured solver, backing backend ID, and capability flags.
+- `GET /health`: returns status, configured solver, backing backend ID, capability flags, whether that solver uses the GPU (`solver_uses_gpu`), and the serving machine's GPU as `{"name", "index", "uuid", "total_bytes", "free_bytes"}` (`null` when nvidia-smi is unavailable or the visible device cannot be resolved). The GPU block is briefly cached, so `/health` stays cheap to poll.
 - `POST /jobs`: submits a solve request with `SimulationConfig`, `frequencies_hz`, and optional uploaded assets.
 - `GET /jobs/{job_id}`: returns job status and artifact links.
 - `GET /jobs/{job_id}/events?since=0`: streams job events as newline-delimited JSON.
@@ -78,6 +160,7 @@ queued
 started
 initialized
 result
+heartbeat        (idle keepalive; no index, not stored)
 result
 ...
 completed

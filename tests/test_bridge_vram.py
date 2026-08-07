@@ -17,6 +17,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "bridge" / "py"))
 
 import vram  # noqa: E402
 
+import blab.gpu as blab_gpu  # noqa: E402
+
 GIB = 1024**3
 
 
@@ -100,34 +102,40 @@ def test_local_gpu_ids_match_the_solver_registry():
 
 
 # --- detection ------------------------------------------------------------
+#
+# The probe itself lives in blab.gpu so the solve server can report its own
+# card in /health; vram re-exports it, and these tests exercise it through
+# the name the bridge actually calls.
 
 
 def test_detect_gpu_memory_returns_none_without_nvidia_smi(monkeypatch):
-    monkeypatch.setattr(vram.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: None)
     assert vram.detect_gpu_memory() is None
 
 
 def test_detect_gpu_memory_parses_nvidia_smi(monkeypatch):
-    monkeypatch.setattr(vram.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(
-        vram.subprocess,
+        blab_gpu.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="NVIDIA GeForce RTX 5080, 16303, 11530\n", stderr=""
+            args=[], returncode=0, stdout="0, GPU-abc123, NVIDIA GeForce RTX 5080, 16303, 11530\n", stderr=""
         ),
     )
     gpu = vram.detect_gpu_memory()
     assert gpu == {
         "name": "NVIDIA GeForce RTX 5080",
+        "index": 0,
+        "uuid": "GPU-abc123",
         "total_bytes": 16303 * 1024**2,
         "free_bytes": 11530 * 1024**2,
     }
 
 
 def test_detect_gpu_memory_survives_a_broken_nvidia_smi(monkeypatch):
-    monkeypatch.setattr(vram.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(
-        vram.subprocess,
+        blab_gpu.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess(args=[], returncode=9, stdout="", stderr="boom"),
     )
@@ -135,22 +143,24 @@ def test_detect_gpu_memory_survives_a_broken_nvidia_smi(monkeypatch):
 
 
 def test_detect_gpu_memory_survives_unparseable_output(monkeypatch):
-    monkeypatch.setattr(vram.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(
-        vram.subprocess,
+        blab_gpu.subprocess,
         "run",
-        lambda *_a, **_k: subprocess.CompletedProcess(args=[], returncode=0, stdout="[N/A], [N/A], [N/A]\n", stderr=""),
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="[N/A], [N/A], [N/A], [N/A], [N/A]\n", stderr=""
+        ),
     )
     assert vram.detect_gpu_memory() is None
 
 
 def test_detect_gpu_memory_survives_a_hung_nvidia_smi(monkeypatch):
-    monkeypatch.setattr(vram.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
 
     def boom(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=10)
 
-    monkeypatch.setattr(vram.subprocess, "run", boom)
+    monkeypatch.setattr(blab_gpu.subprocess, "run", boom)
     assert vram.detect_gpu_memory() is None
 
 

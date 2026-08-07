@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from blab.config import SimulationConfig
+from blab.gpu import backend_uses_gpu, detect_gpu_memory
 from blab.live import LiveSolveDataset, LiveSolver
 from blab.protocol import (
     frequency_result_to_dict,
@@ -41,6 +42,15 @@ SERVER_SOLVER_BACKEND_IDS = {
     "beat_rocm": "beat_rocm",
 }
 LOGGER = logging.getLogger("blab.server")
+
+# nvidia-smi is a subprocess; /health can be polled. Seconds.
+GPU_CACHE_TTL_S = 5.0
+
+# How long an idle event stream waits before writing a heartbeat line. A remote
+# client uses the gap between heartbeats to tell "the solve is slow" from "the
+# link is dead", and writing gives this thread a chance to notice a hung up
+# client instead of blocking on wait_for_event forever.
+EVENT_HEARTBEAT_INTERVAL_S = 15.0
 
 
 class BackendServerSolver:
@@ -435,6 +445,22 @@ class BlabServer(ThreadingHTTPServer):
         super().__init__(server_address, BlabRequestHandler)
         self.orchestrator = orchestrator
         self.solver_id = normalize_server_solver_id(solver_id)
+        self._gpu_cache: tuple[float, dict | None] | None = None
+
+    def gpu_info(self) -> dict | None:
+        """This machine's GPU, briefly cached.
+
+        A remote client sizing a solve needs the VRAM of the box that will
+        actually run it, and /health is the only channel it has. nvidia-smi is a
+        subprocess, so cache it for a few seconds -- long enough that a health
+        poll is cheap, short enough that free memory is still meaningful.
+        """
+        now = time.monotonic()
+        if self._gpu_cache is not None and now - self._gpu_cache[0] < GPU_CACHE_TTL_S:
+            return self._gpu_cache[1]
+        gpu = detect_gpu_memory()
+        self._gpu_cache = (now, gpu)
+        return gpu
 
     def health_payload(self) -> dict[str, Any]:
         backend_id = server_solver_backend_id(self.solver_id)
@@ -445,6 +471,11 @@ class BlabServer(ThreadingHTTPServer):
             "solver": self.solver_id,
             "backend": info.backend_id,
             "solver_label": info.label,
+            # Whether the configured solver runs in GPU memory at all; a client
+            # comparing its VRAM estimate against `gpu` should check this first,
+            # since nvidia-smi may well report a card on a bempp_cpu server.
+            "solver_uses_gpu": backend_uses_gpu(info.backend_id),
+            "gpu": self.gpu_info(),
             "capabilities": {
                 "supports_spherical_sampling": capabilities.supports_spherical_sampling,
                 "supports_impedance": capabilities.supports_impedance,
@@ -551,7 +582,21 @@ class BlabRequestHandler(BaseHTTPRequestHandler):
                 if terminal:
                     LOGGER.info("job event stream completed job_id=%s events_sent_through=%s", job_id, next_index - 1)
                     return
-                self.server.orchestrator.wait_for_event(job_id, next_index)
+                if events:
+                    continue
+                self.server.orchestrator.wait_for_event(job_id, next_index, timeout_s=EVENT_HEARTBEAT_INTERVAL_S)
+                pending, terminal = self.server.orchestrator.events_since(job_id, next_index)
+                if not pending and not terminal:
+                    # Idle keepalive. Heartbeats are not stored events and carry
+                    # no index, so a reconnecting client's `since` is unaffected.
+                    self.wfile.write(
+                        json.dumps(
+                            {"job_id": job_id, "type": "heartbeat", "timestamp": time.time()},
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        + b"\n"
+                    )
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             LOGGER.warning("job event stream disconnected job_id=%s events_sent_through=%s", job_id, next_index - 1)
 
