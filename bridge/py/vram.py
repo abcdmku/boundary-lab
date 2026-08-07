@@ -29,6 +29,22 @@ Peak dense footprint is therefore ``8 * (2*V*F + 4*V*V)`` bytes. The assembly
 stage's own peak (eight real ``Float32`` staging arrays plus one materialized
 complex operator) is smaller, so the solve step sets the high-water mark.
 
+The singular-correction stage does not raise that mark either, which is easy to
+misread:
+
+* ``BeatEngineCudaAssembly.jl`` materializes each complex operator and
+  immediately ``CUDA.unsafe_free!``s its real/imag staging pair, one at a time,
+  *before* calling ``add_singular_corrections_cuda_compact!``.
+* That function's four "storage" arrays come from
+  ``_cuda_complex_operator_storage``, which is
+  ``reinterpret(reshape, T, operator)`` -- a view over the resident operator,
+  not a copy. Its only allocations are ``pair_count x 3`` / ``pair_count x 9``
+  value blocks, i.e. O(N), counted below.
+* The eight ``Float32`` matrices in ``add_image_singular_corrections_cuda_
+  compact!`` sit in the ``else`` of ``if on_gpu``. The CUDA path passes
+  ``on_gpu=true``, so that branch is the CPU-operator fallback and never runs
+  here.
+
 Symmetry reduces this, it does not grow it: the reduced mesh IS the fundamental
 domain and image contributions are accumulated into the same matrices by extra
 kernel launches (``_launch_regular_symmetry_image_kernel!``). Halving the
