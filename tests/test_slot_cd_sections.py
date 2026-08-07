@@ -299,3 +299,124 @@ class TestTriangleEstimate:
         base = horn.estimate_triangles({})
         finer = horn.estimate_triangles({"angular_segments": 128})
         assert finer > 1.8 * base
+
+
+# ---------------------------------------------------------------------------
+# Outer bounding-box estimate
+#
+# mouth_width/mouth_height are the AIR aperture; the shell's rolled mouth lip
+# adds material on every side. A campaign trial was rejected by the size gate
+# because the designer budgeted 380 mm of mouth against a 450 mm limit and got a
+# 470 mm shell, so the relationship is pinned here (and documented in the schema
+# and in agents/horn-optimization/designer.md).
+# ---------------------------------------------------------------------------
+
+
+def built_bbox(params: dict) -> list[float]:
+    """[x, y, z] span of the mirrored mesh — what generators.mesh_stats reports."""
+    points, _triangles = build_full(params)
+    span = points.max(axis=0) - points.min(axis=0)
+    return [float(v) for v in span]
+
+
+class TestBboxEstimate:
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"plug": False},
+            {"mouth_roundover": 0},
+            {"roundover_sweep_deg": 30, "mouth_roundover": 30},
+            {"roundover_sweep_deg": 180, "mouth_roundover": 30},
+            {"pinch": 0.4, "flare_exp": 1.6, "mouth_superellipse_n": 6},
+            {"back": "enclosure"},
+            {"back": "enclosure", "enclosure_depth": 40},
+            {"wall_angle_deg": 30, "plug_angle_deg": 30, "slot_length": 80, "plug_tip_length": 18},
+        ],
+    )
+    def test_estimate_matches_built_mesh(self, params):
+        assert horn.estimate_bbox_mm(params) == pytest.approx(built_bbox(params), abs=1e-6)
+
+    @pytest.mark.parametrize("sweep", [30.0, 45.0, 89.0, 90.0, 95.0, 100.0, 110.0, 120.0, 150.0, 179.0, 180.0])
+    @pytest.mark.parametrize("segments", [2, 3, 4, 5, 7])
+    def test_lip_depth_follows_the_sampled_arc(self, sweep, segments):
+        # The rolled lip is a sampled arc: past 90 deg it only reaches the full
+        # mouth_roundover when 90 deg happens to be one of the stations (sweep 120
+        # with 4 segments does; sweep 100 with 4 segments stops 1.5% short).
+        # Assuming the continuous maximum overstated depth by up to ~1.3 mm and
+        # could reject a valid near-limit proposal.
+        params = {"roundover_sweep_deg": sweep, "roundover_segments": segments, "mouth_roundover": 30}
+        assert horn.estimate_bbox_mm(params)[2] == pytest.approx(built_bbox(params)[2], abs=1e-6)
+
+    def test_lip_depth_is_short_of_the_radius_when_90_deg_is_not_sampled(self):
+        # Stations 0/25/50/75/100 deg: the deepest is the one nearest 90, here 100
+        # (sin 100 deg > sin 75 deg), so the lip stops 1.5% short of the radius.
+        stations = {"roundover_sweep_deg": 100.0, "roundover_segments": 4, "mouth_roundover": 30}
+        assert horn.mouth_lip_depth_mm(stations) == pytest.approx(30.0 * np.sin(np.radians(100.0)))
+        assert horn.mouth_lip_depth_mm(stations) < 30.0
+        # A sweep that does sample 90 deg reaches the full radius.
+        sampled = {"roundover_sweep_deg": 120.0, "roundover_segments": 4, "mouth_roundover": 30}
+        assert horn.mouth_lip_depth_mm(sampled) == pytest.approx(30.0)
+        # Worst case in the schema's legal range: 110 deg over 3 segments samples
+        # 0/36.7/73.3/110, straddling 90 without hitting it. Here the winner is
+        # 73.3 deg, not the endpoint — so take the max over the stations rather
+        # than assuming which one is deepest.
+        worst = {"roundover_sweep_deg": 110.0, "roundover_segments": 3, "mouth_roundover": 30}
+        assert horn.mouth_lip_depth_mm(worst) == pytest.approx(30.0 * np.sin(np.radians(110.0 * 2 / 3)))
+        assert 30.0 - horn.mouth_lip_depth_mm(worst) == pytest.approx(1.26, abs=0.01)
+
+    def test_lip_depth_is_plain_sine_up_to_quarter_round(self):
+        for sweep in (30.0, 60.0, 90.0):
+            params = {"roundover_sweep_deg": sweep, "roundover_segments": 4, "mouth_roundover": 30}
+            assert horn.mouth_lip_depth_mm(params) == pytest.approx(30.0 * np.sin(np.radians(sweep)))
+
+    def test_margin_is_unaffected_by_arc_sampling(self):
+        # 1 - cos increases monotonically, so the outermost station is always the
+        # last one, which the loft samples exactly whatever roundover_segments is.
+        base = horn.mouth_to_outer_margin_mm({"roundover_sweep_deg": 100.0, "mouth_roundover": 30})
+        for segments in (2, 3, 5, 9):
+            params = {"roundover_sweep_deg": 100.0, "roundover_segments": segments, "mouth_roundover": 30}
+            assert horn.mouth_to_outer_margin_mm(params) == pytest.approx(base)
+            assert horn.estimate_bbox_mm(params)[0] == pytest.approx(built_bbox(params)[0], abs=1e-6)
+
+    def test_rejected_campaign_trial_is_predicted_exactly(self):
+        # runs/campaigns/smoke02 trial 3: generated 470.0 x 320.0 x 218.1 mm and
+        # was rejected against a 450 mm width limit.
+        params = {
+            "throat_diameter": 36,
+            "wall_angle_deg": 30,
+            "slot_width": 20,
+            "slot_length": 80,
+            "plug_angle_deg": 30,
+            "plug_tip_length": 18,
+            "mouth_width": 380,
+            "mouth_height": 230,
+            "flare_depth": 150,
+            "mouth_roundover": 30,
+            "roundover_sweep_deg": 120,
+            "wall_thickness": 6,
+        }
+        assert horn.estimate_bbox_mm(params) == pytest.approx([470.0, 320.0, 218.105], abs=1e-3)
+
+    def test_margin_is_roundover_at_quarter_round(self):
+        params = {"mouth_roundover": 25, "roundover_sweep_deg": 90, "wall_thickness": 6}
+        assert horn.mouth_to_outer_margin_mm(params) == pytest.approx(25.0)
+
+    def test_margin_is_twice_roundover_at_full_rollback(self):
+        params = {"mouth_roundover": 25, "roundover_sweep_deg": 180, "wall_thickness": 6}
+        assert horn.mouth_to_outer_margin_mm(params) == pytest.approx(50.0)
+
+    def test_margin_is_wall_thickness_without_roundover(self):
+        assert horn.mouth_to_outer_margin_mm({"mouth_roundover": 0, "wall_thickness": 6}) == pytest.approx(6.0)
+
+    def test_margin_never_below_wall_thickness(self):
+        for sweep in (30.0, 60.0, 90.0, 135.0, 180.0):
+            margin = horn.mouth_to_outer_margin_mm({"mouth_roundover": 8, "roundover_sweep_deg": sweep})
+            assert margin >= 6.0  # default wall_thickness
+
+    def test_enclosure_margin_used_for_box_back(self):
+        assert horn.mouth_to_outer_margin_mm({"back": "enclosure", "enclosure_margin": 30}) == pytest.approx(30.0)
+
+    def test_invalid_params_raise_before_meshing(self):
+        with pytest.raises(ValueError, match="slot_length must exceed throat_diameter"):
+            horn.estimate_bbox_mm({"slot_length": 40, "throat_diameter": 60})

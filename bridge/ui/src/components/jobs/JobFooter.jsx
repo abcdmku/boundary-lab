@@ -11,9 +11,15 @@ const SUBSCORE_LABELS = [
 function ScoreLine({ summary }) {
   const subs = summary && summary.subscores;
   if (!subs || typeof subs !== "object" || Array.isArray(subs)) return null;
-  const parts = SUBSCORE_LABELS.filter(
-    ([key]) => typeof subs[key] === "number" && Number.isFinite(subs[key]),
-  ).map(([key, label]) => `${label} ${fmtScore(subs[key])}`);
+  // A null subscore means the scorer could not measure that term (see
+  // metrics.json `warnings`); it was dropped from the weighted score rather
+  // than awarded 1.0. Show it as n/a — omitting it entirely would hide that
+  // the job is being scored on fewer terms than the spec asked for.
+  const parts = SUBSCORE_LABELS.filter(([key]) => key in subs).map(([key, label]) =>
+    typeof subs[key] === "number" && Number.isFinite(subs[key])
+      ? `${label} ${fmtScore(subs[key])}`
+      : `${label} n/a`,
+  );
   if (!parts.length) return null;
   const score = summary.score;
   const head =

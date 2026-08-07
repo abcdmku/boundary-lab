@@ -14,6 +14,9 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "bridge" / "py"))
 
 import metrics  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLAYBOOK_DIR = REPO_ROOT / "agents" / "horn-optimization"
+
 ANGLES = np.arange(-180.0, 181.0, 5.0)
 
 
@@ -31,12 +34,19 @@ def write_npz(
     v_raw=None,
     angles: np.ndarray = ANGLES,
 ) -> Path:
-    """Write a synthetic NPZ with the exact key set blabctl's cmd_solve produces."""
+    """Write a synthetic NPZ with the exact key set blabctl's cmd_solve produces.
+
+    The default raw arrays carry a linear-in-log10(f) level trend, so the on-axis
+    cut varies across the band and on-axis ripple is *measurable* (and, being a
+    pure trend, detrends to zero). Pass a constant ``h_raw`` to reproduce a
+    flat-target-normalized solve, where ripple is not measurable at all.
+    """
     freq_hz = np.asarray(freq_hz, dtype=np.float32)
     h_norm = np.asarray(h_norm, dtype=np.float32)
     v_norm = h_norm if v_norm is None else np.asarray(v_norm, dtype=np.float32)
-    h_raw = h_norm + 90.0 if h_raw is None else np.asarray(h_raw, dtype=np.float32)
-    v_raw = v_norm + 90.0 if v_raw is None else np.asarray(v_raw, dtype=np.float32)
+    level = (90.0 + 5.0 * np.log10(np.asarray(freq_hz, dtype=float)))[:, np.newaxis]
+    h_raw = h_norm + level if h_raw is None else np.asarray(h_raw, dtype=np.float32)
+    v_raw = v_norm + level if v_raw is None else np.asarray(v_raw, dtype=np.float32)
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "pressure_data_raw.npz"
     np.savez_compressed(
@@ -156,14 +166,43 @@ def test_coverage_exact_target_scores_one(tmp_path):
     assert result["subscores"]["coverage"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_coverage_without_target_is_permissive(tmp_path):
+def test_axis_without_target_is_unscored_not_perfect(tmp_path):
     npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], np.vstack([tent(90.0)] * 3))
     result = metrics.compute_metrics(npz, make_spec())
     horizontal = result["coverage"]["horizontal"]
     assert horizontal["target_deg"] is None
     assert horizontal["mean_dev_deg"] is None
-    assert horizontal["subscore"] == 1.0
+    assert horizontal["subscore"] is None
+    # Beamwidths are still reported — they are informative without a target.
     assert len(horizontal["beamwidth_deg"]) == 3
+    # With neither axis targeted, coverage as a whole drops out of the score.
+    assert result["subscores"]["coverage"] is None
+    assert "coverage" in result["unmeasured_subscores"]
+    assert result["weights"]["coverage"] == 0.0
+
+
+def test_omitted_axis_does_not_dilute_the_requested_one(tmp_path):
+    # A campaign that targets only the horizontal axis must be scored on that
+    # axis alone. Averaging in a free 1.0 for the omitted axis would report a
+    # near-total coverage failure (0.012) as a passable 0.506.
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], np.vstack([tent(10.0)] * 3))
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=100.0))
+    horizontal = result["coverage"]["horizontal"]
+    assert result["coverage"]["vertical"]["subscore"] is None
+    assert result["subscores"]["coverage"] == pytest.approx(horizontal["subscore"])
+    assert result["subscores"]["coverage"] < 0.05
+    assert result["unmeasured_subscores"] == []  # coverage itself IS measured
+
+
+def test_both_axes_targeted_are_averaged(tmp_path):
+    h_norm = np.vstack([tent(90.0)] * 3)  # on target
+    v_norm = np.vstack([tent(10.0)] * 3)  # far off target
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], h_norm, v_norm=v_norm)
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0, vertical_target_deg=90.0))
+    axes = result["coverage"]
+    assert result["subscores"]["coverage"] == pytest.approx(
+        (axes["horizontal"]["subscore"] + axes["vertical"]["subscore"]) / 2.0
+    )
 
 
 def test_coverage_target_with_no_valid_beamwidth_fails(tmp_path):
@@ -293,6 +332,66 @@ def test_ripple_orthogonal_residual_measured_exactly(tmp_path):
     assert ripple["rms_db"] == pytest.approx(d, rel=1e-3)
     assert ripple["peak_to_peak_db"] == pytest.approx(2 * d, rel=1e-3)
     assert ripple["subscore"] == pytest.approx(1.0 / (1.0 + d**2), rel=1e-3)
+
+
+def test_flat_on_axis_is_unmeasured_not_perfect(tmp_path):
+    # The BEAT/bempp pipeline flat-target-normalizes the drive, so the 0 deg cut of
+    # horizontal_spl_db is constant across the band. Awarding 1.0 there would be a
+    # free perfect subscore for every design; the term must drop out instead.
+    freqs = [1000.0, 2000.0, 4000.0, 8000.0]
+    h_norm = np.vstack([tent(90.0)] * 4)
+    npz = write_npz(tmp_path, freqs, h_norm, h_raw=h_norm + 93.9794)
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0, vertical_target_deg=90.0))
+    ripple = result["on_axis_ripple"]
+    assert ripple["measured"] is False
+    assert ripple["subscore"] is None
+    assert ripple["peak_to_peak_db"] is None
+    assert ripple["rms_db"] is None
+    assert "flat-target" in ripple["reason"]
+    assert result["subscores"]["on_axis_ripple"] is None
+    assert result["unmeasured_subscores"] == ["on_axis_ripple"]
+    assert result["warnings"] == [ripple["reason"]]
+    # Weight dropped, not silently redistributed-and-forgotten: it reads as zero and
+    # the survivors still sum to 1.
+    assert result["weights"]["on_axis_ripple"] == 0.0
+    assert sum(result["weights"].values()) == pytest.approx(1.0)
+    assert result["score"] == pytest.approx(
+        sum(result["weights"][name] * result["subscores"][name] for name in ("coverage", "di_smoothness", "size"))
+    )
+    # allow_nan=False proves None (not NaN) reached the JSON.
+    assert json.loads(json.dumps(result, allow_nan=False))["subscores"]["on_axis_ripple"] is None
+
+
+def test_unmeasured_ripple_weight_redistributes_over_survivors(tmp_path):
+    freqs = [1000.0, 2000.0, 4000.0, 8000.0]
+    h_norm = np.vstack([tent(90.0)] * 4)
+    npz = write_npz(tmp_path, freqs, h_norm, h_raw=np.zeros((4, ANGLES.size)) + 93.9794)
+    weights = {"coverage": 1.0, "di_smoothness": 1.0, "on_axis_ripple": 2.0, "size": 0.0}
+    result = metrics.compute_metrics(npz, make_spec(weights=weights, horizontal_target_deg=90.0))
+    assert result["weights"] == pytest.approx({"coverage": 0.5, "di_smoothness": 0.5, "on_axis_ripple": 0.0, "size": 0.0})
+
+
+def test_all_weight_on_unmeasurable_subscore_raises(tmp_path):
+    freqs = [1000.0, 2000.0, 4000.0]
+    h_norm = np.vstack([tent(90.0)] * 3)
+    npz = write_npz(tmp_path, freqs, h_norm, h_raw=h_norm + 93.9794)
+    weights = {"coverage": 0.0, "di_smoothness": 0.0, "on_axis_ripple": 1.0, "size": 0.0}
+    with pytest.raises(ValueError, match="unmeasurable"):
+        metrics.compute_metrics(npz, make_spec(weights=weights))
+
+
+def test_measured_ripple_reports_span_and_scores(tmp_path):
+    freqs = [1000.0, 2000.0, 4000.0, 8000.0]
+    h_norm = np.vstack([tent(90.0)] * 4)
+    npz = write_npz(tmp_path, freqs, h_norm)  # default raw arrays carry a level trend
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0))
+    ripple = result["on_axis_ripple"]
+    assert ripple["measured"] is True
+    assert ripple["reason"] is None
+    assert ripple["on_axis_span_db"] == pytest.approx(5.0 * math.log10(8.0), rel=1e-3)
+    assert ripple["subscore"] == pytest.approx(1.0, abs=1e-4)
+    assert result["unmeasured_subscores"] == []
+    assert result["warnings"] == []
 
 
 def test_zero_tolerance_rejected(tmp_path):
@@ -431,6 +530,115 @@ def test_spec_without_objective_raises(tmp_path):
     npz = _simple_npz(tmp_path)
     with pytest.raises(ValueError, match="objective"):
         metrics.compute_metrics(npz, {})
+
+
+# --- the playbook's spec.json IS the scorer's spec -------------------------
+#
+# The campaign playbooks and this scorer were built in parallel and their spec
+# contracts silently diverged: the playbook taught a flat
+# band_hz{fmin,fmax}/coverage{h_deg,v_deg}/weights{h_bw,...} shape, the scorer
+# required a nested objective block, and every campaign died at scoring. These
+# tests parse the playbook's own worked example and score with it, so the two
+# can never drift apart again without a red test.
+
+
+def playbook_spec_example() -> dict:
+    """The `spec.json` worked example from orchestrator.md, parsed as JSON."""
+    text = (PLAYBOOK_DIR / "orchestrator.md").read_text(encoding="utf-8")
+    marker = "### `spec.json` — worked example"
+    assert marker in text, f"orchestrator.md no longer contains the {marker!r} heading"
+    after = text.split(marker, 1)[1]
+    _, _, rest = after.partition("```json\n")
+    block, fence, _ = rest.partition("\n```")
+    assert fence, "no fenced ```json block follows the spec.json worked-example heading"
+    return json.loads(block)
+
+
+def test_playbook_spec_example_is_parseable_and_canonical():
+    spec = playbook_spec_example()
+    objective = metrics.objective_of(spec)
+    assert isinstance(spec.get("description"), str), "campaign prose belongs in `description`, not `objective`"
+    assert set(objective) <= {"band_hz", "coverage", "weights", "size_limit_mm"}
+    assert len(objective["band_hz"]) == 2, "band_hz is a [lo, hi] array, not an {fmin, fmax} object"
+    assert set(objective["coverage"]) == {"horizontal_target_deg", "vertical_target_deg", "tolerance_deg"}
+    assert set(objective["weights"]) == set(metrics.DEFAULT_WEIGHTS)
+    assert set(objective["size_limit_mm"]) == {"width", "height", "depth"}
+    # The scoring band must lie inside the band the example actually solves, or
+    # every campaign copied from it scores zero in-band frequencies.
+    assert objective["band_hz"][0] >= spec["solve"]["fmin"]
+    assert objective["band_hz"][1] <= spec["solve"]["fmax"]
+
+
+def test_playbook_spec_example_scores_a_solve(tmp_path):
+    """End-to-end: the playbook example, unedited, scores a solve run."""
+    spec = playbook_spec_example()
+    band_lo, band_hi = spec["objective"]["band_hz"]
+    freqs = np.geomspace(band_lo, band_hi, 8)
+    h_norm = np.vstack([tent(90.0)] * freqs.size)
+    v_norm = np.vstack([tent(60.0)] * freqs.size)
+    npz = write_npz(tmp_path, freqs, h_norm, v_norm=v_norm)
+    limits = spec["objective"]["size_limit_mm"]
+    mesh_result = {"bbox_mm": [limits["width"], limits["height"], limits["depth"]], "triangles": 7420}
+
+    result = metrics.compute_metrics(npz, spec, mesh_result=mesh_result)
+
+    assert 0.0 <= result["score"] <= 1.0
+    assert set(result["subscores"]) == set(metrics.DEFAULT_WEIGHTS)
+    # The example's targets are met exactly by these tents, so coverage is perfect.
+    assert result["subscores"]["coverage"] == pytest.approx(1.0, abs=1e-3)
+    assert result["size"]["penalty"] == 0.0
+    assert sum(result["weights"].values()) == pytest.approx(1.0)
+    json.loads(json.dumps(result, allow_nan=False))
+
+
+PLAYBOOKS = ["orchestrator.md", "designer.md", "trial-runner.md"]
+SUPERSEDED_KEYS = ['"h_bw"', '"v_bw"', '"h_deg"', '"v_deg"', '"smoothness"', '"ripple"']
+
+
+@pytest.mark.parametrize("playbook", PLAYBOOKS)
+@pytest.mark.parametrize("legacy", SUPERSEDED_KEYS)
+def test_playbooks_do_not_teach_the_superseded_spec_keys(playbook, legacy):
+    text = (PLAYBOOK_DIR / playbook).read_text(encoding="utf-8")
+    assert legacy not in text, f"{playbook} still teaches the superseded spec key {legacy}"
+
+
+@pytest.mark.parametrize("playbook", PLAYBOOKS)
+def test_every_playbook_json_objective_block_is_canonical(playbook):
+    """Any objective a playbook shows anywhere must be one the scorer accepts."""
+    text = (PLAYBOOK_DIR / playbook).read_text(encoding="utf-8")
+    blocks = [block for block in text.split("```json\n")[1:]]
+    checked = 0
+    for block in blocks:
+        body, fence, _ = block.partition("\n```")
+        assert fence, f"unterminated ```json block in {playbook}"
+        parsed = json.loads(body)
+        if not isinstance(parsed, dict) or "objective" not in parsed:
+            continue
+        objective = metrics.objective_of(parsed)  # raises if the shape is wrong
+        assert set(objective) <= {"band_hz", "coverage", "weights", "size_limit_mm"}
+        assert set(objective.get("weights", {})) <= set(metrics.DEFAULT_WEIGHTS)
+        checked += 1
+    if playbook == "orchestrator.md":
+        assert checked >= 1, "orchestrator.md must keep at least one worked objective example"
+
+
+def test_superseded_flat_spec_gets_a_migration_error(tmp_path):
+    """The exact spec shape the old playbook taught, with an actionable error."""
+    npz = _simple_npz(tmp_path)
+    flat = {
+        "objective": "Constant-directivity 90x60 horn",
+        "coverage": {"h_deg": 90, "v_deg": 60},
+        "band_hz": {"fmin": 800, "fmax": 16000},
+        "weights": {"h_bw": 1.0, "v_bw": 1.0, "smoothness": 0.5, "ripple": 0.5},
+        "size_limit_mm": {"w": 400, "h": 250, "d": 300},
+    }
+    with pytest.raises(ValueError) as excinfo:
+        metrics.compute_metrics(npz, flat)
+    message = str(excinfo.value)
+    assert "description" in message  # where the prose should have gone
+    for canonical in ("objective.band_hz", "objective.coverage", "objective.weights", "objective.size_limit_mm"):
+        assert canonical in message
+    assert "horizontal_target_deg" in message and "di_smoothness" in message
 
 
 def test_provenance_prefers_solve_metrics(tmp_path):

@@ -237,6 +237,11 @@ export function buildMcpServer(): McpServer {
         status: finished.status,
         triangles: s.triangles ?? s.n_triangles ?? null,
         bboxMm: s.bbox_mm ?? s.bbox ?? null,
+        // Closed-form prediction of bboxMm (generators that expose one). Callers can
+        // get this WITHOUT meshing via `blabctl.py estimate`, so a size limit can be
+        // checked before a trial is spent — mouth params are the air aperture, the
+        // outer envelope is larger.
+        estimatedBboxMm: s.estimated_bbox_mm ?? null,
         drivenTag: s.driven_tag ?? null,
         qualityWarning: s.quality_warning ?? s.mesh_quality_warning ?? null,
         // Informational: estimated peak GPU memory per symmetry option. Large
