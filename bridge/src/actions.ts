@@ -8,6 +8,8 @@ import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
 import { generatorsCache, getGenerator } from "./generators.ts";
+import * as vastRegistry from "./vast/registry.ts";
+import { describeKey as describeVastKey } from "./vast/key.ts";
 
 export class ActionError extends Error {
   constructor(
@@ -260,6 +262,7 @@ export function rescanRun(id: string): store.Run {
 
 export function fullState() {
   const gens = generatorsCache();
+  const vastKey = describeVastKey();
   return {
     generators: gens.generators,
     generatorsError: gens.error ?? null,
@@ -267,5 +270,17 @@ export function fullState() {
     queue: queue.queueSnapshot(),
     t3: { configured: t3Configured() },
     publicUrl: config.publicUrl,
+    /**
+     * Rented compute. Cached registry state only — this is the SSE snapshot
+     * path and must never make an upstream call. Use GET /api/vast/instances
+     * to refresh against vast.ai. The key itself is never included, only
+     * whether one is configured and where it came from.
+     */
+    vast: {
+      configured: vastKey.configured,
+      keySource: vastKey.source,
+      instances: vastRegistry.list(),
+      activeBurnRatePerHour: Number(vastRegistry.activeBurnRatePerHour().toFixed(4)),
+    },
   };
 }

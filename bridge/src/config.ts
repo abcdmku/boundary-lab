@@ -39,6 +39,44 @@ export const config = {
    * PATH — hardcoding a machine-specific default here would defeat that.
    */
   juliaExecutable: process.env.BLAB_JULIA_EXECUTABLE ?? null,
+
+  /**
+   * vast.ai compute provider (bridge/src/vast/). Renting costs real money, so
+   * everything here defaults to the safe end: no key, a conservative price
+   * ceiling, and no automatic anything. See bridge/src/vast/key.ts for how the
+   * API key is resolved — it is deliberately NOT read from this object first.
+   */
+  vast: {
+    /**
+     * Last-resort API key slot (precedence 3, after VAST_API_KEY and
+     * ~/.vast_api_key). Exists for embedders and tests; nothing writes a key
+     * here from disk, and it is never serialized.
+     */
+    apiKey: null as string | null,
+    baseUrl: (process.env.VAST_BASE_URL ?? "https://console.vast.ai").replace(/\/$/, ""),
+    /**
+     * Hard ceiling on $/hour for a rent request. A rent above this is refused
+     * outright, before any confirmation is even considered — a second line of
+     * defence behind the mandatory `confirm` flag against a fat-fingered
+     * offer id landing on an 8×H100 box.
+     */
+    maxPricePerHour: Number(process.env.VAST_MAX_PRICE_PER_HOUR ?? 2.0),
+    /** Default docker image for rented solve boxes (CUDA runtime + Ubuntu). */
+    image: process.env.VAST_IMAGE ?? "nvidia/cuda:12.6.3-runtime-ubuntu24.04",
+    /** Default disk to request, GB. Julia depot + CUDA artifacts need ~30 GB. */
+    diskGb: Number(process.env.VAST_DISK_GB ?? 60),
+    /** Container-internal port the remote `blab server` binds. */
+    solverPort: Number(process.env.VAST_SOLVER_PORT ?? 8765),
+    /** Private key for SSH into rented instances. null = ssh-agent / defaults. */
+    sshKeyFile: process.env.VAST_SSH_KEY_FILE ?? null,
+    /** Public key registered on the instance at create time, if set. */
+    sshPublicKeyFile: process.env.VAST_SSH_PUBLIC_KEY_FILE ?? null,
+    /** Git remote the instance clones the solver from. */
+    repoUrl: process.env.VAST_REPO_URL ?? "https://github.com/abcdmku/boundary-lab.git",
+    repoRef: process.env.VAST_REPO_REF ?? "main",
+    /** Persistent path on the instance that caches venv + Julia depot + repo. */
+    cacheRoot: process.env.VAST_CACHE_ROOT ?? "/workspace/blab",
+  },
 };
 
 export const t3Configured = () => config.t3BaseUrl !== null && config.t3Token !== null;

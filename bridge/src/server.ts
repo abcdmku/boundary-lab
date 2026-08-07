@@ -18,6 +18,7 @@ import * as queue from "./queue.ts";
 import * as actions from "./actions.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
+import { vastRouter } from "./vast/routes.ts";
 
 store.loadStore();
 
@@ -154,6 +155,9 @@ app.get("/api/events", (req, res) => {
   store.emitter.on("change", onChange);
   req.on("close", () => store.emitter.off("change", onChange));
 });
+
+// ---------- compute providers: rented vast.ai GPUs ----------
+app.use("/api/vast", vastRouter);
 
 // ---------- artifacts: files from a run's directory ----------
 app.get("/artifacts/:runId/*", (req, res) => {

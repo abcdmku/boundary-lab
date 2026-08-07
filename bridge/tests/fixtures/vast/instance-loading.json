@@ -1,0 +1,24 @@
+{
+  "instances": {
+    "id": 20250808,
+    "machine_id": 4455,
+    "label": "boundary-lab-solver",
+    "gpu_name": "RTX 4090",
+    "num_gpus": 1,
+    "gpu_ram": 24564,
+    "disk_space": 60.0,
+    "image_uuid": "nvidia/cuda:12.6.3-runtime-ubuntu24.04",
+    "image_runtype": "ssh ssh_direc ssh_proxy",
+    "actual_status": "loading",
+    "intended_status": "running",
+    "cur_state": "running",
+    "status_msg": "pulling image nvidia/cuda:12.6.3-runtime-ubuntu24.04",
+    "dph_total": 0.3421,
+    "start_date": 1754400000.0,
+    "ssh_host": null,
+    "ssh_port": null,
+    "public_ipaddr": "65.130.162.74",
+    "ports": null,
+    "geolocation": "Washington, US"
+  }
+}
