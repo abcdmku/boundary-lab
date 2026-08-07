@@ -1,0 +1,303 @@
+/* Sweep builder + batch grouping. Plain CSS on the shared tokens, matching
+   the rest of the board (see index.css for why utilities are avoided here). */
+
+/* ------------------------------------------------------- sweep builder --- */
+.sweep-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .sweep-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.sweep-col {
+  min-width: 0;
+}
+.sweep-section {
+  margin-bottom: 14px;
+}
+.sweep-section:last-child {
+  margin-bottom: 0;
+}
+.sweep-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.sweep-legend-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+/* mesh picker */
+.mesh-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.mesh-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.mesh-item:last-child {
+  border-bottom: 0;
+}
+.mesh-item:hover {
+  background: var(--accent);
+}
+.mesh-item:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.mesh-item--on {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.mesh-item--on:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+}
+.mesh-item input {
+  accent-color: var(--primary);
+  pointer-events: none;
+}
+.mesh-item-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mesh-item-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* variants table */
+.variant-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+.variant-table th {
+  padding: 0 4px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.variant-table td {
+  padding: 2px 4px;
+  vertical-align: top;
+}
+.variant-table .input,
+.variant-table .select {
+  height: 26px;
+  font-size: 12px;
+}
+.variant-index {
+  width: 22px;
+  padding-top: 8px !important;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.variant-drop {
+  width: 26px;
+}
+
+/* preview */
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.preview-count {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.preview-count--over {
+  color: var(--destructive-foreground);
+}
+.preview-formula {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.preview-scroll {
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.preview-scroll .dtable th {
+  background: var(--popover);
+}
+.preview-name {
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* result */
+.result-list {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.result-row {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.result-row:last-child {
+  border-bottom: 0;
+}
+.result-id {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+/* -------------------------------------------------------- batch groups --- */
+.batch-group {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--foreground) 2%, transparent);
+}
+.batch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.batch-head:hover {
+  background: var(--accent);
+  border-radius: 12px;
+}
+.batch-chevron {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  transition: transform 0.15s;
+}
+.batch-chevron--open {
+  transform: rotate(90deg);
+}
+.batch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.batch-id {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+.batch-counts {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.count-chip {
+  display: inline-flex;
+  height: 17px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.count-chip--running {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--foreground);
+}
+.count-chip--done {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success-foreground);
+}
+.count-chip--failed {
+  background: color-mix(in srgb, var(--destructive) 16%, transparent);
+  color: var(--destructive-foreground);
+}
+.batch-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.batch-head:hover .batch-actions,
+.batch-actions:focus-within,
+.batch-actions--armed {
+  opacity: 1;
+}
+.batch-bar {
+  display: flex;
+  height: 3px;
+  overflow: hidden;
+  margin: 0 10px;
+  border-radius: 999px;
+  background: var(--border);
+}
+.batch-bar-seg {
+  height: 100%;
+}
+.batch-bar-seg--done {
+  background: var(--success);
+}
+.batch-bar-seg--running {
+  background: var(--primary);
+}
+.batch-bar-seg--failed {
+  background: var(--destructive);
+}
+.batch-bar-seg--draft {
+  background: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.batch-jobs {
+  padding: 8px 8px 2px;
+}
+.batch-jobs .job-card:last-child {
+  margin-bottom: 6px;
+}

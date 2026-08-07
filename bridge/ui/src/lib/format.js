@@ -21,3 +21,33 @@ export function relTime(iso) {
   if (s < 86400) return Math.floor(s / 3600) + " h ago";
   return Math.floor(s / 86400) + " d ago";
 }
+
+// ---- money / time, for the cost-bearing cloud surfaces ----
+
+/** "$0.412" — cloud prices are sub-cent-significant, so 3 places by default. */
+export function fmtMoney(v, places = 3) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  return "$" + v.toFixed(places);
+}
+
+/** "$0.412/hr", the unit every rent decision is actually made in. */
+export function fmtRate(v) {
+  return typeof v === "number" && Number.isFinite(v) ? `${fmtMoney(v)}/hr` : "—";
+}
+
+/** "3h 12m" / "12m 40s" — uptime, never a precise clock. */
+export function fmtDuration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.floor(seconds);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+export function fmtNum(v, places = 2) {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(places) : "—";
+}
