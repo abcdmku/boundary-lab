@@ -200,7 +200,7 @@ def vram_report(
         gpu = detect_gpu_memory()
     if gpu is None:
         report["warning"] = (
-            f"Could not detect local GPU memory (nvidia-smi unavailable), so the "
+            "Could not detect local GPU memory (nvidia-smi unavailable), so the "
             f"{report['estimate_human']} estimated for this solve could not be checked against it. "
             "Proceeding anyway; if the solve dies with an out-of-memory error, reduce the mesh or "
             "solve with symmetry."
@@ -208,11 +208,15 @@ def vram_report(
         return report
 
     report["gpu"] = gpu
-    capacity = gpu.get("free_bytes") or gpu.get("total_bytes")
-    if capacity is None or estimate <= capacity:
+    # "Will it fit right now" is the useful question, so prefer free over total.
+    # A genuine 0 free is still the right number to compare against, hence the
+    # explicit None check rather than an `or`.
+    free_bytes = gpu.get("free_bytes")
+    which = "free" if isinstance(free_bytes, int) else "total"
+    capacity = free_bytes if which == "free" else gpu.get("total_bytes")
+    if not isinstance(capacity, int) or estimate <= capacity:
         return report
 
-    which = "free" if gpu.get("free_bytes") else "total"
     hint = (
         "Coarsen the mesh or solve with symmetry (halving the element count quarters the memory)."
         if symmetry == "off"
