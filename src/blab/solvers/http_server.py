@@ -195,28 +195,36 @@ class HttpServerSession:
         self._response = self._open_event_stream(0)
         self._events = self._iter_events()
 
-        for event in self._events:
-            event_type = str(event.get("type", ""))
-            if event_type == "queued":
-                self._emit_status("Server job queued")
-            elif event_type == "started":
-                self._emit_status("Server job started")
-            elif event_type == "initialized":
-                sphere_metadata = event.get("sphere_metadata") or {}
-                self._metadata = SolveMetadata(
-                    polar_angle_deg=ndarray_from_wire(event["polar_angle_deg"]),
-                    radiator_names=np.asarray(event.get("radiator_names", ["Radiator"])),
-                    sphere_metadata={key: ndarray_from_wire(value) for key, value in sphere_metadata.items()},
-                )
-                self._emit_status("Solving on server...")
-                return
-            elif event_type == "cancelled":
-                raise RuntimeError("Server job cancelled before initialization.")
-            elif event_type == "completed":
-                raise RuntimeError("Server job completed before initialization.")
-            elif event_type == "failed":
-                raise RuntimeError(str(event.get("error", "Server job failed.")))
+        # Any exit from here other than a successful `initialized` leaves nobody
+        # to call solve_stream's finally, so close the socket on the way out
+        # rather than holding it open against a remote box.
+        try:
+            for event in self._events:
+                event_type = str(event.get("type", ""))
+                if event_type == "queued":
+                    self._emit_status("Server job queued")
+                elif event_type == "started":
+                    self._emit_status("Server job started")
+                elif event_type == "initialized":
+                    sphere_metadata = event.get("sphere_metadata") or {}
+                    self._metadata = SolveMetadata(
+                        polar_angle_deg=ndarray_from_wire(event["polar_angle_deg"]),
+                        radiator_names=np.asarray(event.get("radiator_names", ["Radiator"])),
+                        sphere_metadata={key: ndarray_from_wire(value) for key, value in sphere_metadata.items()},
+                    )
+                    self._emit_status("Solving on server...")
+                    return
+                elif event_type == "cancelled":
+                    raise RuntimeError("Server job cancelled before initialization.")
+                elif event_type == "completed":
+                    raise RuntimeError("Server job completed before initialization.")
+                elif event_type == "failed":
+                    raise RuntimeError(str(event.get("error", "Server job failed.")))
+        except BaseException:
+            self._close_response()
+            raise
 
+        self._close_response()
         raise RuntimeError("Server event stream ended before initialization.")
 
     def _open_event_stream(self, since: int):

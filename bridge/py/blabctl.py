@@ -232,6 +232,15 @@ def cmd_solve(args: argparse.Namespace) -> dict:
     from blab.solvers.base import SolveRequest
     from blab.solvers.registry import create_backend, normalize_backend_id
 
+    backend_id = normalize_backend_id(args.backend)
+    if args.server_url and backend_id != "server":
+        # Silently solving locally when the caller named a remote machine is the
+        # kind of thing that only shows up in the timings.
+        raise RuntimeError(
+            f"--server-url {args.server_url} only applies to --backend server, but --backend is "
+            f"'{args.backend}' (backend '{backend_id}' runs locally). Add --backend server, or drop --server-url."
+        )
+
     mesh_run = Path(args.mesh_run).resolve()
     generate_result = json.loads((mesh_run / "result.json").read_text(encoding="utf-8"))
     out_dir = Path(args.out).resolve()
@@ -290,7 +299,6 @@ def cmd_solve(args: argparse.Namespace) -> dict:
     config_path = out_dir / "config.toml"
     _write_solve_toml(config_path, mesh_file, radiators_raw)
 
-    backend_id = normalize_backend_id(args.backend)
     julia_exe = resolve_julia_exe(args.julia_exe)
     backend_kwargs = {}
     server_url = None
@@ -299,9 +307,10 @@ def cmd_solve(args: argparse.Namespace) -> dict:
         backend_kwargs = {"julia_executable": julia_exe, "persistent_worker": False}
     elif backend_id == "server":
         server_url = resolve_server_url(args.server_url)
+        server_token = resolve_server_token(args.server_token)
         backend_kwargs = {
             "server_url": server_url,
-            "server_auth_token": resolve_server_token(args.server_token),
+            "server_auth_token": server_token,
             "server_health_timeout_s": args.server_timeout,
             "server_request_timeout_s": max(args.server_timeout, 30.0),
         }
@@ -309,11 +318,7 @@ def cmd_solve(args: argparse.Namespace) -> dict:
         # what it can do: whether a symmetry-reduced mesh is safe to send, and
         # how much VRAM the box that will actually run this has. Failing here
         # beats failing after uploading a 200 MB mesh.
-        server_health = probe_server_health(
-            server_url,
-            timeout_s=args.server_timeout,
-            auth_token=resolve_server_token(args.server_token),
-        )
+        server_health = probe_server_health(server_url, timeout_s=args.server_timeout, auth_token=server_token)
         from blab.solvers.http_server import server_health_summary, server_health_supports_symmetry
 
         progress("solve", f"Solve server {server_url}: {server_health_summary(server_health)}")

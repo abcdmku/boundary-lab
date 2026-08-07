@@ -186,6 +186,20 @@ def test_blabctl_solve_help_documents_the_localhost_default():
     assert blabctl.build_parser().parse_args(["solve", "--mesh-run", "m", "--out", "o"]).server_url is None
 
 
+def test_a_server_url_on_a_local_backend_is_an_error_not_a_silent_local_solve(monkeypatch, capsys):
+    def unreachable(*_a, **_k):
+        raise AssertionError("no server should be contacted")
+
+    monkeypatch.setattr(blabctl, "probe_server_health", unreachable)
+    lines, code = run_blabctl(
+        ["solve", "--mesh-run", "m", "--out", "o", "--backend", "beat_cuda", "--server-url", "http://remote:8765"],
+        monkeypatch,
+        capsys,
+    )
+    assert code == 1
+    assert "only applies to --backend server" in lines[-1]["error"]
+
+
 def test_resolve_server_url_prefers_cli_then_env_then_localhost(monkeypatch):
     monkeypatch.delenv("BLAB_SERVER_URL", raising=False)
     assert blabctl.resolve_server_url(None) == DEFAULT_SERVER_URL
