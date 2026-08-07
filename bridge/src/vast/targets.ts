@@ -50,9 +50,13 @@ export function toComputeTarget(entry: ManagedInstance): ComputeTarget {
     type: "remote",
     label: `${entry.gpuName}${entry.numGpus > 1 ? ` ×${entry.numGpus}` : ""} — ${entry.label}`,
     ...(entry.serverUrl ? { serverUrl: entry.serverUrl } : {}),
-    // One solve per rented box by default: a single instance is one GPU as
-    // far as this bridge is concerned, exactly like the local machine.
-    concurrency: entry.numGpus > 1 ? entry.numGpus : 1,
+    // One solve per rented box, even on a multi-GPU instance: the managed
+    // server is provisioned with --max-running-jobs 1 (see
+    // provision/vast_bootstrap.sh), so extra slots would only make the bridge
+    // start blabctl children — and their 4 h timeout clocks — for jobs that sit
+    // waiting in the server's private queue. Raising this needs the bootstrap
+    // to advertise and assign matching parallelism first.
+    concurrency: 1,
     available: reason === null,
     ...(reason ? { unavailableReason: reason } : {}),
     status: entry.status,
@@ -68,12 +72,10 @@ export function toComputeTarget(entry: ManagedInstance): ComputeTarget {
 
 /** Called once at startup from server.ts. */
 export function registerVastTargets() {
-  registerTargetProvider(() =>
-    // Destroyed instances are gone, not merely unavailable — listing them would
-    // just be noise in every target picker.
-    registry
-      .list()
-      .filter((entry) => entry.status !== "destroyed")
-      .map(toComputeTarget),
-  );
+  // Destroyed instances stay in the list, marked unavailable with a reason.
+  // Dropping them would make a `vast:<id>` target that this bridge DID manage
+  // indistinguishable from one it never knew about — and an id it never knew
+  // about is taken on trust at launch, which is exactly wrong for a box that
+  // has since been destroyed. A picker can filter on `available`.
+  registerTargetProvider(() => registry.list().map(toComputeTarget));
 }

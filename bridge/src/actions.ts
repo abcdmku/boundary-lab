@@ -17,6 +17,7 @@ import * as store from "./store.ts";
 import * as queue from "./queue.ts";
 import {
   blabctlSupportsServerUrl,
+  getTarget,
   listTargets,
   normalizeTarget,
   targetLabel,
@@ -101,6 +102,41 @@ function requireTargetRunnable(job: Pick<store.Job, "target">) {
         `${targetLabel(job.target)} — update the python layer, or retarget the job to local`,
       409,
     );
+}
+
+/**
+ * Re-resolve a job's target against the registry immediately before it is
+ * queued, and persist the result.
+ *
+ * A draft can sit for hours. In that time a rented instance can be stopped,
+ * destroyed, or restarted with a NEW port mapping — the stored serverUrl is a
+ * snapshot from creation time, and dispatching to it would either fail or,
+ * worse, reach whatever now answers on that host:port. The registry is the
+ * authority, so ask it again: it refuses an instance that is no longer usable
+ * (404/409, with the reason) and hands back the current URL otherwise.
+ *
+ * Only ids a provider actually owns are re-resolved. An instanceId no provider
+ * knows about is a label the caller pinned alongside their own serverUrl — the
+ * same trust a bare URL gets, and nothing has "changed" about it. (A managed
+ * instance that was destroyed stays in the provider's list, marked
+ * unavailable, precisely so it does NOT fall into this trusted case.)
+ */
+function refreshTargetForLaunch(job: store.Job) {
+  const current = job.target;
+  if (current && current.type === "remote" && current.instanceId) {
+    if (getTarget(current.instanceId)) {
+      const fresh = target(current.instanceId);
+      if (JSON.stringify(fresh) !== JSON.stringify(current)) {
+        store.updateJob(job.id, { target: fresh });
+        console.log(
+          `[bridge] job ${job.id}: target ${current.instanceId} moved to ${targetLabel(fresh)}`,
+        );
+      }
+    } else if (!current.serverUrl) {
+      throw new ActionError(`unknown target "${current.instanceId}" and no serverUrl pinned`, 404);
+    }
+  }
+  requireTargetRunnable(store.getJob(job.id) ?? job);
 }
 
 function solveParams(meshJobId: string, options?: SolveOptions): Record<string, unknown> {
@@ -472,7 +508,7 @@ export function createBatch(input: BatchInput): BatchResult {
       try {
         if (job.kind === "solve") {
           requireMeshDone(String(job.params.meshJobId));
-          requireTargetRunnable(job);
+          refreshTargetForLaunch(job);
         }
       } catch (err) {
         store.finishJob(job.id, {
@@ -541,7 +577,7 @@ export function launchJobs(selector: JobSelector): LaunchResult {
     try {
       if (job.kind === "solve") {
         requireMeshDone(String(job.params.meshJobId));
-        requireTargetRunnable(job);
+        refreshTargetForLaunch(job);
       } else requireGenerator(String(job.generator ?? ""));
     } catch (err) {
       result.skipped.push({ jobId: job.id, reason: err instanceof Error ? err.message : String(err) });

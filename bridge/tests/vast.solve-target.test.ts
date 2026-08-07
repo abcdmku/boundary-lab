@@ -129,14 +129,27 @@ test("a stopped instance cannot take work", () => {
   throwsWith(() => actions.startSolve({ meshJobId: meshJob(), target: TARGET_ID }), 409, /not ready/);
 });
 
-test("a destroyed instance is gone, not merely unavailable", () => {
+test("a destroyed instance is listed but refused, never silently trusted", () => {
   reset();
   seed({ status: "destroyed" });
-  assert.equal(
-    targets.listTargets().some((t) => t.id === TARGET_ID),
-    false,
-    "destroyed instances are not listed at all",
-  );
+  // It must stay in the list: dropping it would make a target this bridge DID
+  // manage look like an id it never knew, which launch takes on trust.
+  const target = targets.listTargets().find((t) => t.id === TARGET_ID)!;
+  assert.equal(target.available, false);
+  assert.match(target.unavailableReason!, /destroyed/);
+  throwsWith(() => actions.startSolve({ meshJobId: meshJob(), target: TARGET_ID }), 409, /destroyed/);
+});
+
+test("an instanceId no provider owns is a caller label, taken on trust", () => {
+  reset();
+  const draft = actions.createDraft({
+    kind: "solve",
+    meshJobId: meshJob(),
+    target: { type: "remote", instanceId: "my-lan-box", serverUrl: "http://192.168.1.9:8765" },
+  });
+  const result = actions.launchJobs({ jobIds: [draft.id] });
+  assert.equal(result.launched.length, 1, JSON.stringify(result.skipped));
+  assert.equal(result.launched[0]!.lane, "remote:my-lan-box");
 });
 
 test("a malformed target is rejected", () => {
@@ -246,6 +259,43 @@ test("a draft may be staged against an instance that is not ready yet", () => {
   // readiness check is what LAUNCH enforces.
   const draft = actions.createDraft({ kind: "solve", meshJobId: meshJob(), target: SERVER_URL });
   assert.equal(draft.status, "draft");
+});
+
+test("a stale draft target is re-resolved against the registry at launch", () => {
+  reset();
+  seed();
+  const draft = actions.createDraft({ kind: "solve", meshJobId: meshJob(), target: TARGET_ID });
+  assert.equal((draft.target as { serverUrl: string }).serverUrl, SERVER_URL);
+
+  // The box is restarted and vast hands out a different host port. A draft
+  // holds a snapshot from creation time, so launching must ask again.
+  const moved = "http://65.130.162.74:41111";
+  seed({ serverUrl: moved });
+  const result = actions.launchJobs({ jobIds: [draft.id] });
+  assert.equal(result.launched.length, 1, JSON.stringify(result.skipped));
+  const launched = store.getJob(draft.id)!;
+  assert.equal((launched.target as { serverUrl: string }).serverUrl, moved, "URL refreshed");
+  assert.equal(queue.buildArgs(launched)[queue.buildArgs(launched).indexOf("--server-url") + 1], moved);
+});
+
+test("a draft whose instance died is refused at launch, not dispatched", () => {
+  reset();
+  seed();
+  const draft = actions.createDraft({ kind: "solve", meshJobId: meshJob(), target: TARGET_ID });
+  seed({ status: "stopped", serverUrl: null, lastHealth: null });
+  const result = actions.launchJobs({ jobIds: [draft.id] });
+  assert.equal(result.launched.length, 0);
+  assert.match(result.skipped[0]!.reason, /not ready/);
+  assert.equal(store.getJob(draft.id)!.status, "draft", "still a draft, still editable/retargetable");
+});
+
+test("a rented box advertises one solve slot, matching its server's limit", () => {
+  reset();
+  // Even a multi-GPU instance: provisioning starts blab server with
+  // --max-running-jobs 1, so extra bridge-side slots would only start children
+  // that idle in the server's own queue while their timeout clock runs.
+  seed({ numGpus: 4 });
+  assert.equal(targets.listTargets().find((t) => t.id === TARGET_ID)!.concurrency, 1);
 });
 
 test("a sweep can fan out across several rented boxes, one lane each", () => {
