@@ -87,6 +87,66 @@ export function startSolve(input: {
   return store.getRun(run.id)!;
 }
 
+const GIB = 1024 ** 3;
+
+/**
+ * Backend ids/aliases that consume the LOCAL machine's GPU memory, mirroring
+ * blab.solvers.registry's alias table. Used only to decide whether an advisory
+ * note is worth showing at queue time; the authoritative check runs in python
+ * (bridge/py/vram.py) once the solve actually starts.
+ */
+const LOCAL_GPU_BACKEND_ALIASES = new Set([
+  "julia_local",
+  "local_julia",
+  "beat",
+  "beat_engine",
+  "beat_cuda",
+  "beat_gpu",
+  "cuda",
+  "beat_rocm",
+  "rocm",
+  "amd",
+  "amdgpu",
+]);
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+/**
+ * Advisory peak-VRAM note for a solve about to be queued, read off the
+ * estimates `generate` recorded on the mesh run. Purely informational — mesh
+ * size is a hardware-capacity question, never a reason to refuse work.
+ */
+export function solveVramNote(meshRunId: string, options?: SolveOptions): string | null {
+  const backend = (options?.backend ?? "beat_cuda").trim().toLowerCase();
+  if (!LOCAL_GPU_BACKEND_ALIASES.has(backend)) return null;
+
+  const vram = asRecord(asRecord(store.getRun(meshRunId)?.summary)?.vram);
+  if (!vram) return null;
+  // generate keys estimates by symmetry: "off" plus the sorted mirror axes it
+  // detected (e.g. "xy"), matching the solve's --symmetry values.
+  const requested = (options?.symmetry ?? "off").trim().toLowerCase() || "off";
+  const key = requested === "off" ? "off" : [...requested].sort().join("");
+  const bytes = asRecord(vram.estimate_bytes)?.[key];
+  if (typeof bytes !== "number" || !Number.isFinite(bytes)) return null;
+
+  const human = `${(bytes / GIB).toFixed(2)} GiB`;
+  const gpu = asRecord(vram.gpu);
+  const total = typeof gpu?.total_bytes === "number" ? gpu.total_bytes : null;
+  if (total === null)
+    return `Estimated peak GPU memory ~${human}; local VRAM could not be detected, so it was not checked.`;
+  const gpuName = typeof gpu?.name === "string" ? gpu.name : "the local GPU";
+  if (bytes > total)
+    return (
+      `WARNING: estimated peak GPU memory ~${human} exceeds the ${(total / GIB).toFixed(2)} GiB on ` +
+      `${gpuName}. The solve is queued anyway and may fail with a CUDA out-of-memory error — ` +
+      `coarsen the mesh or solve with symmetry if it does.`
+    );
+  return `Estimated peak GPU memory ~${human} of ${(total / GIB).toFixed(2)} GiB on ${gpuName}.`;
+}
+
 export function cancelRun(id: string): store.Run {
   const run = store.getRun(id);
   if (!run) throw new ActionError(`unknown run ${id}`, 404);

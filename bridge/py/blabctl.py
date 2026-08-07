@@ -18,10 +18,6 @@ from pathlib import Path
 BRIDGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BRIDGE_DIR.parents[1]
 DEFAULT_JULIA_EXE = Path("C:/Users/Borg/AppData/Local/Programs/Julia-1.12.6/bin/julia.exe")
-# Iteration budget for this machine (RTX 5080): ~9k triangles solves in minutes;
-# the documented 13.6k case already takes over an hour. Larger meshes are for
-# final verification only — set allow_large: true in the params JSON.
-TRIANGLE_GUARD = 9000
 
 # --name becomes filename stems like <name>.msh / <name>.cfg inside the run
 # directory. Restrict it to a safe basename: no path separators, no leading
@@ -86,6 +82,42 @@ def cmd_list_generators(_args: argparse.Namespace) -> dict:
     }
 
 
+def _generate_vram_estimates(result: dict) -> dict:
+    """Informational peak-VRAM estimates for the meshes this generate produced.
+
+    Generation never refuses a mesh for its size: a big mesh is a hardware
+    capacity question, answered at solve time against the machine that will
+    actually run it. These numbers let callers (and the solve tool, before the
+    solve is dequeued) see what they are about to ask for.
+    """
+    import vram
+    from generators import mesh_dof_counts
+
+    estimates: dict[str, int] = {}
+    counts: dict[str, dict] = {}
+    candidates = [("off", result.get("cleaned_msh_path"))]
+    mirror_axes = [str(axis).lower() for axis in (result.get("mirror_axes") or [])]
+    if result.get("reduced_msh_path") and mirror_axes:
+        candidates.append(("".join(sorted(mirror_axes)), result["reduced_msh_path"]))
+    for symmetry, path in candidates:
+        if not path or not Path(path).exists():
+            continue
+        try:
+            vertices, triangles = mesh_dof_counts(Path(path))
+        except (OSError, ValueError):
+            continue
+        estimates[symmetry] = vram.estimate_solve_vram_bytes(triangles=triangles, vertices=vertices)
+        counts[symmetry] = {"vertices": vertices, "triangles": triangles}
+
+    gpu = vram.detect_gpu_memory()
+    return {
+        "estimate_bytes": estimates,
+        "estimate_human": {key: vram.format_bytes(value) for key, value in estimates.items()},
+        "mesh_counts": counts,
+        "gpu": gpu,
+    }
+
+
 def cmd_generate(args: argparse.Namespace) -> dict:
     from generators import apply_defaults, export_viewer_stls, load_generator
     from preview import render_mesh_preview
@@ -100,15 +132,7 @@ def cmd_generate(args: argparse.Namespace) -> dict:
     result["generator"] = args.generator
     result["name"] = args.name
 
-    triangles = int(result["triangles"])
-    # Strict identity check: params are arbitrary caller JSON, and any truthy
-    # junk (e.g. the string "false") must not defeat the iteration budget.
-    allow_large = raw_params.get("allow_large") is True
-    if triangles > TRIANGLE_GUARD and not allow_large:
-        raise RuntimeError(
-            f"Mesh has {triangles} triangles, over the {TRIANGLE_GUARD} guard. "
-            "Coarsen the mesh parameters, or set allow_large: true (JSON boolean) in the params JSON to override."
-        )
+    result["vram"] = _generate_vram_estimates(result)
 
     driven_tags = tuple(sorted({int(radiator["tag"]) for radiator in result["radiators"]})) or (
         int(result["driven_tag"]),
@@ -237,6 +261,31 @@ def cmd_solve(args: argparse.Namespace) -> dict:
         backend_kwargs = {"julia_executable": julia_exe, "persistent_worker": False}
     backend = create_backend(backend_id, **backend_kwargs)
 
+    # Capacity check, never a gate: estimate peak VRAM for the mesh actually
+    # handed to the solver (post symmetry reduction) and warn if the local GPU
+    # cannot hold it. Remote/CPU backends and undetectable GPUs never block.
+    import vram as vram_mod
+    from generators import mesh_dof_counts
+
+    try:
+        solver_vertices, solver_triangles = mesh_dof_counts(mesh_file)
+    except (OSError, ValueError):
+        solver_vertices, solver_triangles = None, int(generate_result["triangles"])
+    vram_report = vram_mod.vram_report(
+        triangles=solver_triangles,
+        vertices=solver_vertices,
+        backend_id=backend_id,
+        symmetry=symmetry,
+    )
+    progress(
+        "solve",
+        f"Estimated peak GPU memory {vram_report['estimate_human']} "
+        f"({vram_report['solver_triangles']} triangles / {vram_report['solver_vertices']} nodes, symmetry={symmetry})",
+    )
+    if vram_report["warning"]:
+        emit({"event": "warning", "stage": "solve", "message": vram_report["warning"]})
+        progress("solve", f"WARNING: {vram_report['warning']}")
+
     frequencies = np.logspace(np.log10(args.fmin), np.log10(args.fmax), args.count)
     total = len(frequencies)
     progress("solve", f"Starting {backend_id} solve: {total} frequencies {args.fmin:g}-{args.fmax:g} Hz", 0, total)
@@ -303,8 +352,14 @@ def cmd_solve(args: argparse.Namespace) -> dict:
         "config_path": str(config_path),
         "pressure_npz": [str(raw_npz), str(formatted_npz)],
         "plots": [{"name": name, "path": path} for name, path in plot_outputs.items()],
+        # Top-level scalar so it survives the bridge's compact summary and shows
+        # up verbatim in the MCP get_run report.
+        "vram_warning": vram_report["warning"],
+        "vram": vram_report,
         "metrics": {
             "triangles": int(generate_result["triangles"]),
+            "solver_triangles": vram_report["solver_triangles"],
+            "vram_estimate_bytes": vram_report["estimate_bytes"],
             "n_freqs": int(total),
             "solve_seconds": round(solve_seconds, 2),
             "backend": backend_id,

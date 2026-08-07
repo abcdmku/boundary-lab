@@ -258,6 +258,12 @@ function startJob(run: store.Run) {
           });
           return;
         }
+        if (eventKind === "warning") {
+          // Advisory only — never fails the run. The durable copy lives in the
+          // result summary; this is the human-readable trace in job.log.
+          logStream.write(`WARNING [${String(parsed.stage ?? "")}] ${String(parsed.message ?? "")}\n`);
+          return;
+        }
         if (eventKind === "result") {
           const { event: _event, type: _type, ok, ...summary } = parsed;
           if (ok === false) {
@@ -335,9 +341,11 @@ async function wakeThread(runId: string) {
   if (!t3Configured() || !run.threadId || run.threadId.includes(":")) return;
   try {
     const thread = await threadInfo(run.threadId);
+    const vramWarning = (run.summary as Record<string, unknown> | undefined)?.vram_warning;
     const lines = [
       `Boundary Lab solve run ${run.id} ("${run.name}") finished: ${run.status.toUpperCase()}.`,
       ...(run.error ? [`Error: ${run.error}`] : []),
+      ...(typeof vramWarning === "string" && vramWarning ? [`VRAM warning: ${vramWarning}`] : []),
       ...(run.artifacts.length
         ? [
             "Artifacts:",
