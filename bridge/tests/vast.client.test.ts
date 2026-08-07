@@ -171,6 +171,56 @@ test("getInstance rejects an array payload rather than mistaking it for one inst
 });
 
 // ---------------------------------------------------------------------------
+// findOffer — the pre-rent quote lookup
+// ---------------------------------------------------------------------------
+
+test("findOffer filters by id and does not re-apply the user's search filters", async () => {
+  const fetchImpl = makeFakeFetch(readOnlyRoutes());
+  const offer = await newClient(fetchImpl).findOffer(11223344, 60);
+  assert.equal(offer?.id, 11223344);
+  const query = fetchImpl.calls[0].body as Record<string, unknown>;
+  assert.deepEqual(query.id, { eq: 11223344 });
+  // Resolving one known id must not exclude offers the user found with
+  // relaxed filters, so verification and port count are left wide open.
+  assert.ok(!("verified" in query), "findOffer must not require verification");
+  assert.deepEqual(query.direct_port_count, { gte: 0 });
+  assert.equal(query.allocated_storage, 60, "the quote must be priced against the disk being rented");
+});
+
+test("findOffer falls back to a broad search when filtering by id is rejected", async () => {
+  let call = 0;
+  const fetchImpl = makeFakeFetch([
+    {
+      method: "POST",
+      path: "/api/v0/bundles/",
+      response: (): unknown => fixture("offers-search"),
+    },
+  ]);
+  const flaky = (async (input: string, init?: RequestInit) => {
+    call++;
+    // `id` is not documented as filterable; a deployment rejecting it must
+    // degrade to the broad search rather than breaking rent entirely.
+    if (call === 1) return new Response(JSON.stringify({ error: "invalid field id" }), { status: 400 });
+    return fetchImpl(input, init);
+  }) as typeof fetchImpl;
+  const client = new VastClient({ apiKey: KEY, fetchImpl: flaky, maxRetries: 0, sleep: async () => {} });
+  const offer = await client.findOffer(11223344, 60);
+  assert.equal(offer?.id, 11223344, "the fallback must still resolve the offer");
+  assert.equal(call, 2);
+});
+
+test("findOffer returns null for an offer that is gone", async () => {
+  const fetchImpl = makeFakeFetch(readOnlyRoutes());
+  assert.equal(await newClient(fetchImpl).findOffer(424242, 60), null);
+});
+
+test("findOffer refuses an offer that is already rented", async () => {
+  const fetchImpl = makeFakeFetch(readOnlyRoutes());
+  // Offer 99887766 in the fixture carries rented: true.
+  assert.equal(await newClient(fetchImpl).findOffer(99887766, 60), null);
+});
+
+// ---------------------------------------------------------------------------
 // rent body
 // ---------------------------------------------------------------------------
 

@@ -100,22 +100,32 @@ export function forget(id: number): boolean {
  * Fold freshly fetched live state from vast.ai into the registry.
  *
  * Rules:
- *   - An entry whose contract is gone upstream becomes "destroyed" (someone
- *     used the vast console, or the host reclaimed it). It is kept, not
- *     deleted, so the cost history stays visible until explicitly forgotten.
  *   - `ssh` and `serverUrl` are refreshed on every pass: the port mapping is
  *     assigned at boot and can change across a stop/start cycle, so a cached
  *     endpoint from a previous run is actively dangerous.
  *   - A stopped contract downgrades "ready" to "stopped" — the blab server
  *     inside it is definitionally not answering.
+ *   - When `authoritative` (the default), `live` is understood to be the
+ *     COMPLETE set of instances on the account, so an entry missing from it
+ *     has genuinely gone away and becomes "destroyed". It is kept, not
+ *     deleted, so the cost history stays visible until explicitly forgotten.
+ *
+ * Pass `{ authoritative: false }` when `live` holds only some instances — a
+ * single-instance lookup, say. Absence then means "not asked about", not
+ * "gone", and untouched entries are left exactly as they were. Getting this
+ * wrong would let a one-instance refresh mark every other instance destroyed.
  */
-export function reconcile(live: Map<number, VastInstance>): ManagedInstance[] {
+export function reconcile(
+  live: Map<number, VastInstance>,
+  options: { authoritative?: boolean } = {},
+): ManagedInstance[] {
+  const authoritative = options.authoritative ?? true;
   const section = read();
   const now = new Date().toISOString();
   for (const entry of section.instances) {
     const observed = live.get(entry.id);
     if (!observed) {
-      if (entry.status !== "destroyed") {
+      if (authoritative && entry.status !== "destroyed") {
         entry.status = "destroyed";
         entry.serverUrl = null;
         entry.ssh = null;

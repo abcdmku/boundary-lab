@@ -442,7 +442,11 @@ export async function provisionInstance(
       latencyMs: health.latencyMs,
       ...extractSolverLabels(health.payload),
     });
-    return registry.get(instanceId)!;
+    const provisioned = registry.get(instanceId);
+    // The entry can be forgotten while a multi-hour provision is in flight.
+    // That is a legitimate operator action, not an error to throw over.
+    if (!provisioned) throw new Error(`instance ${instanceId} was removed from the registry during provisioning`);
+    return provisioned;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     registry.setStatus(instanceId, "error", message);

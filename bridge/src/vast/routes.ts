@@ -237,7 +237,9 @@ vastRouter.get("/instances/:id", async (req, res) => {
       const raw = await vast.getInstance(id);
       if (raw) {
         live = normalizeInstance(raw, { solverPort: entry.solverPort });
-        registry.reconcile(new Map([[id, live]]));
+        // Not authoritative: this map holds one instance, so absence from it
+        // must not be read as "every other instance is gone".
+        registry.reconcile(new Map([[id, live]]), { authoritative: false });
       }
     }
     res.json({ instance: registry.get(id) ?? entry, live });
@@ -277,11 +279,13 @@ vastRouter.post("/instances", async (req, res) => {
     const label = optionalString(input.label) ?? "boundary-lab-solver";
 
     // Re-fetch the offer so the quote reflects reality, not whatever the
-    // client believed when it rendered its list.
+    // client believed when it rendered its list. `diskGb` is passed because
+    // vast prices dph_total against it — the quote would otherwise be for a
+    // different disk than the one actually being rented.
     const vast = client();
-    const { offers } = await vast.searchOffers({ diskGb, limit: 200 });
-    const match = offers.map(normalizeOffer).find((offer) => offer.id === offerId);
-    if (!match)
+    const raw = await vast.findOffer(offerId, diskGb);
+    const match = raw ? normalizeOffer(raw) : null;
+    if (!match || !match.rentable || match.rented)
       throw new VastRouteError(
         `offer ${offerId} is no longer available — search again and pick a current offer`,
         409,
@@ -568,7 +572,7 @@ vastRouter.post("/instances/:id/import", async (req, res) => {
       lastHealth: null,
       live: null,
     });
-    registry.reconcile(new Map([[id, live]]));
+    registry.reconcile(new Map([[id, live]]), { authoritative: false });
     res.status(201).json({ instance: registry.get(id) ?? entry, live });
   } catch (err) {
     fail(res, err);

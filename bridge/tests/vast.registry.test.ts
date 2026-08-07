@@ -167,6 +167,25 @@ test("an instance missing upstream is marked destroyed and loses its endpoints",
   assert.equal(entry.ssh, null);
 });
 
+test("a NON-authoritative reconcile leaves unmentioned instances alone", () => {
+  reset();
+  registry.add(makeEntry({ id: 1, status: "ready", serverUrl: "http://a:1" }));
+  registry.add(makeEntry({ id: 20250806, status: "provisioning" }));
+  // A single-instance lookup must not be read as "everything else is gone" —
+  // that would mark every other managed instance destroyed.
+  registry.reconcile(liveMap(runningLive()), { authoritative: false });
+  assert.equal(registry.get(1)?.status, "ready", "an unmentioned instance must be untouched");
+  assert.equal(registry.get(1)?.serverUrl, "http://a:1");
+  assert.equal(registry.get(20250806)?.live?.actualStatus, "running", "the named one still refreshes");
+});
+
+test("an authoritative reconcile does mark unmentioned instances destroyed", () => {
+  reset();
+  registry.add(makeEntry({ id: 1, status: "ready", serverUrl: "http://a:1" }));
+  registry.reconcile(liveMap(runningLive())); // authoritative by default
+  assert.equal(registry.get(1)?.status, "destroyed");
+});
+
 test("a destroyed entry is kept for the audit trail, not deleted", () => {
   reset();
   registry.add(makeEntry({ status: "ready" }));

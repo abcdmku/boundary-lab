@@ -367,6 +367,34 @@ export class VastClient {
   }
 
   /**
+   * Re-fetch one offer by id, for quoting a rent against live data.
+   *
+   * vast has no "get offer" endpoint, so this filters the search by id. That
+   * field is not documented as filterable, so a rejection is treated as
+   * "unsupported" rather than an error: we fall back to a broad permissive
+   * search and look the id up in the results. Deliberately permissive on
+   * verification and port count — we are resolving one known id, not
+   * re-applying the user's search filters, so an offer they legitimately found
+   * with relaxed filters must still resolve here.
+   *
+   * Returns null when the offer is genuinely gone (taken by someone else, or
+   * withdrawn by the host), which callers must treat as "do not rent".
+   */
+  async findOffer(offerId: number, diskGb?: number): Promise<RawVastOffer | null> {
+    const base: OfferSearchFilters = { diskGb, verified: false, minDirectPorts: 0, limit: 200 };
+    try {
+      const query = { ...buildOfferQuery(base), id: { eq: offerId } };
+      const payload = await this.request<{ offers?: RawVastOffer[] }>("POST", "/api/v0/bundles/", query);
+      const match = (payload?.offers ?? []).find((offer) => Number(offer.id) === offerId);
+      if (match) return match.rented === true ? null : match;
+    } catch {
+      /* `id` is evidently not filterable on this deployment — fall back */
+    }
+    const { offers } = await this.searchOffers(base);
+    return offers.find((offer) => Number(offer.id) === offerId) ?? null;
+  }
+
+  /**
    * All instances on the account. The v0 list endpoint is deprecated; v1 pages
    * with next_token and caps limit at 25.
    */
