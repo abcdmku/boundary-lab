@@ -1,8 +1,16 @@
-"""VRAM estimation for BEM solves, and detection of the local GPU's capacity.
+"""VRAM estimation for BEM solves, and detection of the GPU's capacity.
 
 Nothing here ever blocks a solve. Mesh size is a hardware-capacity question,
 not a correctness one: we estimate what the solve will need, compare it with
-what the local GPU actually has, and warn. The solve proceeds either way.
+what the GPU that will run it actually has, and warn. The solve proceeds either
+way.
+
+"The GPU that will run it" is not always this machine's. For ``beat_cuda`` /
+``beat_rocm`` it is the local card, read from nvidia-smi. For the ``server``
+backend the solve happens wherever the far end is, so the comparison is against
+the ``gpu`` block in that server's ``GET /health`` payload -- and only when the
+server says it is running a GPU solver, since a card being present on a
+``bempp_cpu`` server tells us nothing.
 
 Where the model comes from
 --------------------------
@@ -67,9 +75,26 @@ high is the right direction for a capacity warning.
 
 from __future__ import annotations
 
-import re
-import shutil
-import subprocess
+from blab.gpu import GPU_BACKEND_IDS, backend_uses_gpu, detect_gpu_memory
+from blab.solvers.http_server import (
+    server_health_backend_id,
+    server_health_gpu,
+    server_health_solver_uses_gpu,
+)
+
+__all__ = [
+    "AUX_BYTES_PER_TRIANGLE",
+    "COMPLEX_BYTES",
+    "DEFAULT_OVERHEAD",
+    "LOCAL_GPU_BACKENDS",
+    "detect_gpu_memory",
+    "estimate_solve_vram_bytes",
+    "format_bytes",
+    "is_local_gpu_backend",
+    "remote_gpu_from_health",
+    "vertices_from_triangles",
+    "vram_report",
+]
 
 # ComplexF32 (solver.jl: FloatType = Float32). 8 bytes per operator entry.
 COMPLEX_BYTES = 8
@@ -92,15 +117,41 @@ DEFAULT_OVERHEAD = 1.25
 # Backends that consume the *local* machine's GPU memory. `server` is remote,
 # `beat_cpu` and `local` (bempp-cl OpenCL) run on host RAM. Ids here are the
 # canonical ones from blab.solvers.registry.normalize_backend_id -- callers must
-# normalize before asking (e.g. "julia_local" normalizes to "beat_cuda").
-LOCAL_GPU_BACKENDS = frozenset({"beat_cuda", "beat_rocm"})
+# normalize before asking (e.g. "julia_local" normalizes to "beat_cuda"). The
+# set itself is shared with blab.server, which uses it to say whether its own
+# configured solver touches the GPU it reports in /health.
+LOCAL_GPU_BACKENDS = GPU_BACKEND_IDS
+
+REMOTE_BACKEND_ID = "server"
 
 GIB = 1024**3
 
 
 def is_local_gpu_backend(normalized_backend_id: str) -> bool:
     """True if this backend solves on the local machine's GPU memory."""
-    return str(normalized_backend_id or "").strip() in LOCAL_GPU_BACKENDS
+    normalized = str(normalized_backend_id or "").strip()
+    return normalized != REMOTE_BACKEND_ID and backend_uses_gpu(normalized)
+
+
+def remote_gpu_from_health(health: dict | None) -> dict | None:
+    """The remote GPU to size a solve against, or None when there isn't one.
+
+    None covers three different situations that all mean "do not compare":
+    no health payload at all, a server whose solver runs on the CPU, and a
+    GPU server that does not report its card (an older build, or no
+    nvidia-smi). Only the third one deserves a "could not check" warning, which
+    is why `vram_report` tests `solver_uses_gpu` separately.
+    """
+    if not isinstance(health, dict):
+        return None
+    if not remote_health_uses_gpu(health):
+        return None
+    return server_health_gpu(health)
+
+
+def remote_health_uses_gpu(health: dict | None) -> bool:
+    """True if the far end's configured solver runs in GPU memory."""
+    return server_health_solver_uses_gpu(health)
 
 
 def vertices_from_triangles(triangles: int) -> int:
@@ -143,45 +194,6 @@ def format_bytes(value: int | float | None) -> str:
     return f"{value / (1024**2):.0f} MiB"
 
 
-def detect_gpu_memory() -> dict | None:
-    """Query the local NVIDIA GPU via nvidia-smi.
-
-    Returns ``{"name", "total_bytes", "free_bytes"}`` for the first GPU, or
-    None when nvidia-smi is missing, fails, or returns nothing parseable (no
-    NVIDIA GPU, an AMD/ROCm box, a driver hiccup). Callers must treat None as
-    "unknown", never as "too small".
-    """
-    exe = shutil.which("nvidia-smi")
-    if not exe:
-        return None
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv, resolved executable
-            [exe, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    for line in completed.stdout.splitlines():
-        fields = [field.strip() for field in line.split(",")]
-        if len(fields) < 3:
-            continue
-        name, total_mib, free_mib = fields[0], fields[1], fields[2]
-        if not re.fullmatch(r"\d+(\.\d+)?", total_mib):
-            continue
-        free_bytes = int(float(free_mib) * 1024**2) if re.fullmatch(r"\d+(\.\d+)?", free_mib) else None
-        return {
-            "name": name,
-            "total_bytes": int(float(total_mib) * 1024**2),
-            "free_bytes": free_bytes,
-        }
-    return None
-
-
 def vram_report(
     *,
     triangles: int,
@@ -189,13 +201,20 @@ def vram_report(
     backend_id: str,
     symmetry: str = "off",
     gpu: dict | None = None,
+    remote_health: dict | None = None,
 ) -> dict:
-    """Estimate, compare against the local GPU, and build a warning if needed.
+    """Estimate, compare against the GPU that will run it, and warn if needed.
 
     Never raises for capacity reasons and never signals refusal -- the returned
     ``warning`` is advisory text (None when everything looks fine).
+
+    ``gpu`` overrides detection (used by tests and by callers that already
+    probed). ``remote_health`` is the far end's ``/health`` payload and is what
+    makes the ``server`` backend checkable at all: without it a remote solve is
+    sized against nothing and simply reports the estimate.
     """
     estimate = estimate_solve_vram_bytes(triangles=triangles, vertices=vertices)
+    remote = str(backend_id or "").strip() == REMOTE_BACKEND_ID
     local_gpu = is_local_gpu_backend(backend_id)
     report: dict = {
         "estimate_bytes": estimate,
@@ -206,12 +225,19 @@ def vram_report(
         "solver_vertices": int(vertices) if vertices else vertices_from_triangles(triangles),
         "local_gpu_backend": local_gpu,
         "gpu": None,
+        "gpu_location": None,
         "warning": None,
     }
-    if not local_gpu:
-        # Not this machine's VRAM on the line: report the estimate, no warning.
-        return report
 
+    if remote:
+        return _apply_remote_capacity(report, remote_health=remote_health, gpu=gpu)
+    if not local_gpu:
+        # Host RAM, not VRAM, on the line: report the estimate, no warning.
+        return report
+    return _apply_local_capacity(report, gpu=gpu)
+
+
+def _apply_local_capacity(report: dict, *, gpu: dict | None) -> dict:
     if gpu is None:
         gpu = detect_gpu_memory()
     if gpu is None:
@@ -222,17 +248,49 @@ def vram_report(
             "solve with symmetry."
         )
         return report
-
     report["gpu"] = gpu
+    report["gpu_location"] = "local"
+    return _warn_if_over_capacity(report, gpu, where="the local GPU", location="local")
+
+
+def _apply_remote_capacity(report: dict, *, remote_health: dict | None, gpu: dict | None) -> dict:
+    """Size a `server` solve against the far end's card, when it reports one."""
+    report["remote_backend"] = server_health_backend_id(remote_health) or None
+    if remote_health is None and gpu is None:
+        # No probe was made (e.g. a caller that never asked for health). Nothing
+        # to compare against and nothing worth complaining about.
+        return report
+    if remote_health is not None and not remote_health_uses_gpu(remote_health):
+        # A CPU solve server has no VRAM limit to blow through.
+        return report
+
+    remote_gpu = gpu if gpu is not None else remote_gpu_from_health(remote_health)
+    if remote_gpu is None:
+        report["warning"] = (
+            f"The solve server reports a GPU solver ({report['remote_backend'] or 'unknown backend'}) but no GPU "
+            f"details, so the {report['estimate_human']} estimated for this solve could not be checked against it. "
+            "Proceeding anyway; if the remote solve dies with an out-of-memory error, reduce the mesh or "
+            "solve with symmetry."
+        )
+        return report
+
+    report["gpu"] = remote_gpu
+    report["gpu_location"] = "remote"
+    return _warn_if_over_capacity(report, remote_gpu, where="the solve server's GPU", location="remote")
+
+
+def _warn_if_over_capacity(report: dict, gpu: dict, *, where: str, location: str) -> dict:
     # "Will it fit right now" is the useful question, so prefer free over total.
     # A genuine 0 free is still the right number to compare against, hence the
     # explicit None check rather than an `or`.
     free_bytes = gpu.get("free_bytes")
     which = "free" if isinstance(free_bytes, int) else "total"
     capacity = free_bytes if which == "free" else gpu.get("total_bytes")
+    estimate = report["estimate_bytes"]
     if not isinstance(capacity, int) or estimate <= capacity:
         return report
 
+    symmetry = report["symmetry"]
     hint = (
         "Coarsen the mesh or solve with symmetry (halving the element count quarters the memory)."
         if symmetry == "off"
@@ -240,10 +298,11 @@ def vram_report(
     )
     report["warning"] = (
         f"Estimated peak GPU memory {report['estimate_human']} exceeds the {which} VRAM on "
-        f"{gpu.get('name', 'the local GPU')} ({format_bytes(capacity)}"
+        f"{gpu.get('name', where)} ({format_bytes(capacity)}"
         + (f" free of {format_bytes(gpu.get('total_bytes'))}" if which == "free" else "")
+        + (" on the solve server" if location == "remote" else "")
         + f"). Solving {report['solver_triangles']} triangles / {report['solver_vertices']} nodes with "
-        f"symmetry='{symmetry}' on backend '{backend_id}' may fail with a CUDA out-of-memory error. "
+        f"symmetry='{symmetry}' on backend '{report['backend']}' may fail with a CUDA out-of-memory error. "
         f"Running anyway. {hint}"
     )
     return report
