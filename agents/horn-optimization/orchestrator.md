@@ -212,7 +212,7 @@ runs/campaigns/cd90x60/
   "size_limit_mm": { "w": 400, "h": 250, "d": 300 },
   "fixed_params": { "throat_diameter_mm": 25.4 },
   "mesh": { "max_triangles": 9000, "min_triangles": 3000, "verify_max_triangles": 14000 },
-  "mesh_verify_params": { "element_size_mm": 4, "allow_large": true },
+  "mesh_verify_params": { "element_size_mm": 4 },
   "solve": { "fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_verify": { "fmin": 500, "fmax": 20000, "count": 48, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_timeout_min": 20,
@@ -238,14 +238,18 @@ Notes:
   run through the bridge HTTP API.
 - `mesh.max_triangles` / `min_triangles` gate the **effective solved** triangle count
   (full count ÷ 2 for symmetry `x`, ÷ 4 for `xy` — the solver receives the reduced
-  mesh); see `trial-runner.md`. The trial-runner also rejects meshes whose `bboxMm`
-  exceeds `size_limit_mm`.
+  mesh); see `trial-runner.md`. These are this campaign's own budget knobs — nothing
+  below them refuses a mesh for being large — so `max_triangles` is really a wall-clock
+  budget (iteration meshes stay small because that is what makes a campaign finish, not
+  because a guard forbids more) and `min_triangles` is the anti-gaming floor. The
+  trial-runner also rejects meshes whose `bboxMm` exceeds `size_limit_mm`.
 - `mesh_verify_params` are resolution-only parameter overrides (names must come from the
   generator's schema; the value here is illustrative) applied on top of the champion's
   params for the verification trial — they must refine the mesh, never change geometry.
-  `allow_large: true` (a generate-layer flag, not a schema param) lifts the generator's
-  built-in 9000-triangle guard for the verify mesh; it belongs only here, never in
-  iteration-trial params.
+  Set `verify_max_triangles` as high as the verify budget allows: generation imposes no
+  size limit of its own. The one hardware constraint is GPU memory, and it is advisory —
+  `generate` reports an estimated peak VRAM per symmetry option and `solve` warns
+  (without refusing) when the estimate exceeds the local GPU's VRAM.
 
 ### `trials.jsonl` — schema and example lines
 

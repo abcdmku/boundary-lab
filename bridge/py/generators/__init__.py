@@ -28,14 +28,21 @@ def load_generator(generator_id: str) -> ModuleType:
         raise ValueError(f"Unknown generator: {generator_id}. Available: {', '.join(sorted(generators))}") from exc
 
 
+# `allow_large` used to override a hard triangle guard at the generate layer.
+# That guard is gone (mesh size is a hardware-capacity question, warned about at
+# solve time, not a reason to refuse a mesh), but campaign specs and saved params
+# still carry the flag. Accept and ignore it rather than erroring on old callers.
+IGNORED_PARAMS = frozenset({"allow_large"})
+
+
 def apply_defaults(params: dict, schema: dict) -> dict:
     """Fill missing params from JSON Schema defaults and reject unknown keys."""
     properties = schema["params"]["properties"]
-    unknown = set(params) - set(properties) - {"allow_large"}
+    unknown = set(params) - set(properties) - IGNORED_PARAMS
     if unknown:
         raise ValueError(f"Unknown params for {schema['id']}: {sorted(unknown)}")
     merged = {name: spec["default"] for name, spec in properties.items() if "default" in spec}
-    merged.update(params)
+    merged.update({name: value for name, value in params.items() if name not in IGNORED_PARAMS})
     return merged
 
 
@@ -49,6 +56,21 @@ def mesh_stats(msh_path: Path) -> tuple[int, list[float]]:
     points = np.asarray(mesh.points, dtype=float)
     span = points.max(axis=0) - points.min(axis=0)
     return int(len(triangles)), [float(v) for v in span]
+
+
+def mesh_dof_counts(msh_path: Path) -> tuple[int, int]:
+    """Return (vertex_count, triangle_count) for a triangle .msh file.
+
+    These are the P1 and DP0 unknown counts the BEAT engine derives from the
+    mesh (``length(mesh.vertices)`` / ``length(mesh.faces)``), which is what the
+    VRAM estimate is built on.
+    """
+    mesh = meshio.read(msh_path)
+    cells = mesh.cells_dict
+    triangles = cells.get("triangle", cells.get("triangle3"))
+    if triangles is None:
+        raise ValueError(f"No triangles in {msh_path}")
+    return int(len(mesh.points)), int(len(triangles))
 
 
 def export_viewer_stls(msh_path: Path, out_dir: Path, name: str, driven_tags: tuple[int, ...]) -> dict:

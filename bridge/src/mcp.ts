@@ -117,7 +117,8 @@ export function buildMcpServer(): McpServer {
     "Generate a mesh with one of Boundary Lab's generators (see list_generators for ids and the " +
       "params schema — pass params as an object matching that schema). Generation is fast: this " +
       "waits up to 120 s and returns a compact result (triangles, bbox, driven tag, quality " +
-      "warnings) plus artifact URLs viewable in a browser. If it is still running after 120 s you " +
+      "warnings, estimated solve VRAM per symmetry option) plus artifact URLs viewable in a " +
+      "browser. Mesh size is never refused here. If it is still running after 120 s you " +
       "get the run id — poll get_run, do not wait busily.",
     {
       generator: z.string().describe("Generator id from list_generators."),
@@ -161,6 +162,13 @@ export function buildMcpServer(): McpServer {
         bboxMm: s.bbox_mm ?? s.bbox ?? null,
         drivenTag: s.driven_tag ?? null,
         qualityWarning: s.quality_warning ?? s.mesh_quality_warning ?? null,
+        // Informational: estimated peak GPU memory per symmetry option. Large
+        // meshes are never refused here — solve warns if the local GPU is too
+        // small for the one you pick.
+        vramEstimate:
+          s.vram !== null && typeof s.vram === "object"
+            ? ((s.vram as Record<string, unknown>).estimate_human ?? null)
+            : null,
         preview: previewUrl(finished),
         artifacts: artifactUrls(finished),
         ui: `${config.publicUrl}/`,
@@ -175,7 +183,10 @@ export function buildMcpServer(): McpServer {
       "a time on the GPU. This returns IMMEDIATELY with the run id and queue position — do NOT " +
       "wait or poll in a tight loop. If you passed `workspace` and your thread is known to t3, the " +
       "bridge will wake your thread with the result when the solve finishes; otherwise check back " +
-      "later with get_run. Results include artifact URLs viewable in a browser.",
+      "later with get_run. Results include artifact URLs viewable in a browser. A `vram` field " +
+      "reports the estimated peak GPU memory and warns (never blocks) if it exceeds the local " +
+      "GPU's VRAM; the authoritative check re-runs when the solve starts and lands in the run " +
+      "summary as `vram_warning`.",
     {
       mesh_run_id: z.string().describe("Run id of a completed mesh run (kind 'mesh', status 'done')."),
       fmin: z.number().optional().describe("Lowest frequency in Hz."),
@@ -188,12 +199,15 @@ export function buildMcpServer(): McpServer {
     },
     async ({ mesh_run_id, fmin, fmax, count, backend, symmetry, name, workspace }) => {
       const ctx = await resolveThreadId(workspace);
+      const options = { fmin, fmax, count, backend, symmetry };
+      // Read the estimate before queueing: startSolve may outlive this call.
+      const vramNote = actions.solveVramNote(mesh_run_id, options);
       let run: store.Run;
       try {
         run = actions.startSolve({
           meshRunId: mesh_run_id,
           name,
-          options: { fmin, fmax, count, backend, symmetry },
+          options,
           ...ctx,
         });
       } catch (err) {
@@ -203,6 +217,7 @@ export function buildMcpServer(): McpServer {
         runId: run.id,
         status: run.status,
         queuePosition: queue.queuePosition(run.id),
+        ...(vramNote ? { vram: vramNote } : {}),
         note:
           "Solve queued. Do not wait busily — " +
           (ctx.threadId

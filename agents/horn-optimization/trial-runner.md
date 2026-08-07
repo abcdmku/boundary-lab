@@ -17,9 +17,10 @@ already contain a line for this trial number — if it does, stop and report ins
 writing a duplicate. For `verify` trials: overlay `spec.mesh_verify_params` (if present)
 onto the given params before generating — these are resolution-only generator parameters
 (e.g. an element-size override) that refine the mesh without touching the champion's
-geometry. The generate layer has a built-in 9000-triangle guard: a verify mesh expected
-to exceed it needs `"allow_large": true` (JSON boolean) in the generate params — never
-set it on iteration trials. Use `spec.solve_verify` instead of `spec.solve`,
+geometry. Generation never refuses a mesh for its size, so a verify mesh may be as fine
+as the spec's verify gates allow; the `generate` result carries a `vramEstimate` per
+symmetry option, and `solve` warns (never blocks) if that estimate exceeds the local
+GPU's VRAM. Use `spec.solve_verify` instead of `spec.solve`,
 `spec.mesh.verify_max_triangles` (if present) instead of `spec.mesh.max_triangles`, and
 `spec.solve_verify_timeout_min` (default 3 × `solve_timeout_min`) as the timeout — fine
 meshes can legitimately take an hour or more.
@@ -46,8 +47,11 @@ Gate — record a failure line (step d) and **skip the solve entirely** if any o
   solve block for this stage). Solve cost and fidelity follow the mesh actually sent to
   the solver — gating the full-mesh count would let a quadrant solve slip under the
   anti-gaming floor.
-  - `effective` > `spec.mesh.max_triangles` (default 9000) — too slow to iterate on
-    (~13.6k ≈ 1 h+ on this GPU; the queue is shared);
+  - `effective` > `spec.mesh.max_triangles` (default 9000) — a per-campaign *time*
+    budget, not a hardware limit: nothing below this layer refuses a large mesh
+    (~13.6k ≈ 1 h+ on this GPU; the queue is shared), so keeping iteration meshes small
+    is what makes the campaign finish. Raise it deliberately per campaign if you are
+    willing to pay for the wall-clock;
   - `effective` < `spec.mesh.min_triangles` (default 3000) — anti-gaming floor: a solve
     this coarse produces flattering, untrustworthy scores;
 - `bboxMm` from the generate result exceeds `spec.size_limit_mm` (width, height, or
