@@ -18,7 +18,7 @@ import "./compute.css";
  * would leave an operator guessing where the key goes.
  */
 export function VastPanel({ vast, targets, refetch, notify }) {
-  const { data: status, error: statusError, loading, reload } = useFetch("/api/vast/status");
+  const { data: status, error: statusError, reload } = useFetch("/api/vast/status");
   const [tab, setTab] = useState("instances");
   const [importId, setImportId] = useState(undefined);
   const [importing, setImporting] = useState(false);
@@ -53,8 +53,25 @@ export function VastPanel({ vast, targets, refetch, notify }) {
     }
   };
 
+  // ---------- still asking ----------
+  // Until either source has answered, "configured" is a guess. Rendering the
+  // no-key onboarding (or an empty instance list) on a guess is the one wrong
+  // answer to give about money, so say plainly that we do not know yet.
+  if (!vast && !status && !statusError) {
+    return (
+      <div className="panel">
+        <div className="panel-head">
+          <span className="panel-title">vast.ai</span>
+        </div>
+        <div className="panel-empty">
+          <span className="spinner" /> Checking the compute provider…
+        </div>
+      </div>
+    );
+  }
+
   // ---------- no key ----------
-  if (!configured && !loading) {
+  if (!configured) {
     return (
       <div className="panel">
         <div className="panel-head">
