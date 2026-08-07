@@ -166,14 +166,43 @@ def test_coverage_exact_target_scores_one(tmp_path):
     assert result["subscores"]["coverage"] == pytest.approx(1.0, abs=1e-4)
 
 
-def test_coverage_without_target_is_permissive(tmp_path):
+def test_axis_without_target_is_unscored_not_perfect(tmp_path):
     npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], np.vstack([tent(90.0)] * 3))
     result = metrics.compute_metrics(npz, make_spec())
     horizontal = result["coverage"]["horizontal"]
     assert horizontal["target_deg"] is None
     assert horizontal["mean_dev_deg"] is None
-    assert horizontal["subscore"] == 1.0
+    assert horizontal["subscore"] is None
+    # Beamwidths are still reported — they are informative without a target.
     assert len(horizontal["beamwidth_deg"]) == 3
+    # With neither axis targeted, coverage as a whole drops out of the score.
+    assert result["subscores"]["coverage"] is None
+    assert "coverage" in result["unmeasured_subscores"]
+    assert result["weights"]["coverage"] == 0.0
+
+
+def test_omitted_axis_does_not_dilute_the_requested_one(tmp_path):
+    # A campaign that targets only the horizontal axis must be scored on that
+    # axis alone. Averaging in a free 1.0 for the omitted axis would report a
+    # near-total coverage failure (0.012) as a passable 0.506.
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], np.vstack([tent(10.0)] * 3))
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=100.0))
+    horizontal = result["coverage"]["horizontal"]
+    assert result["coverage"]["vertical"]["subscore"] is None
+    assert result["subscores"]["coverage"] == pytest.approx(horizontal["subscore"])
+    assert result["subscores"]["coverage"] < 0.05
+    assert result["unmeasured_subscores"] == []  # coverage itself IS measured
+
+
+def test_both_axes_targeted_are_averaged(tmp_path):
+    h_norm = np.vstack([tent(90.0)] * 3)  # on target
+    v_norm = np.vstack([tent(10.0)] * 3)  # far off target
+    npz = write_npz(tmp_path, [1000.0, 2000.0, 4000.0], h_norm, v_norm=v_norm)
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0, vertical_target_deg=90.0))
+    axes = result["coverage"]
+    assert result["subscores"]["coverage"] == pytest.approx(
+        (axes["horizontal"]["subscore"] + axes["vertical"]["subscore"]) / 2.0
+    )
 
 
 def test_coverage_target_with_no_valid_beamwidth_fails(tmp_path):
@@ -312,7 +341,7 @@ def test_flat_on_axis_is_unmeasured_not_perfect(tmp_path):
     freqs = [1000.0, 2000.0, 4000.0, 8000.0]
     h_norm = np.vstack([tent(90.0)] * 4)
     npz = write_npz(tmp_path, freqs, h_norm, h_raw=h_norm + 93.9794)
-    result = metrics.compute_metrics(npz, make_spec())
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0, vertical_target_deg=90.0))
     ripple = result["on_axis_ripple"]
     assert ripple["measured"] is False
     assert ripple["subscore"] is None
@@ -338,7 +367,7 @@ def test_unmeasured_ripple_weight_redistributes_over_survivors(tmp_path):
     h_norm = np.vstack([tent(90.0)] * 4)
     npz = write_npz(tmp_path, freqs, h_norm, h_raw=np.zeros((4, ANGLES.size)) + 93.9794)
     weights = {"coverage": 1.0, "di_smoothness": 1.0, "on_axis_ripple": 2.0, "size": 0.0}
-    result = metrics.compute_metrics(npz, make_spec(weights=weights))
+    result = metrics.compute_metrics(npz, make_spec(weights=weights, horizontal_target_deg=90.0))
     assert result["weights"] == pytest.approx({"coverage": 0.5, "di_smoothness": 0.5, "on_axis_ripple": 0.0, "size": 0.0})
 
 
@@ -355,7 +384,7 @@ def test_measured_ripple_reports_span_and_scores(tmp_path):
     freqs = [1000.0, 2000.0, 4000.0, 8000.0]
     h_norm = np.vstack([tent(90.0)] * 4)
     npz = write_npz(tmp_path, freqs, h_norm)  # default raw arrays carry a level trend
-    result = metrics.compute_metrics(npz, make_spec())
+    result = metrics.compute_metrics(npz, make_spec(horizontal_target_deg=90.0))
     ripple = result["on_axis_ripple"]
     assert ripple["measured"] is True
     assert ripple["reason"] is None

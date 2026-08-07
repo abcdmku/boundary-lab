@@ -241,7 +241,10 @@ Notes:
     *scoring* band and is independent of the `solve` block's `fmin`/`fmax` (which is the
     band actually solved); the scorer needs ≥ 3 solved frequencies inside it.
   - `coverage` — `horizontal_target_deg`, `vertical_target_deg`, `tolerance_deg`
-    (default 10). Omit a target to leave that axis unscored.
+    (default 10). Omit a target to leave that axis genuinely unscored: the subscore
+    averages only the axes you target, so an omitted axis cannot dilute the penalty on
+    one you care about. Omit both and `coverage` itself becomes unmeasurable and drops
+    out of the weighted score (see below).
   - `weights` — exactly the four subscore names `coverage`, `di_smoothness`,
     `on_axis_ripple`, `size`. Any positive scale works; the scorer normalizes them to
     sum to 1 and echoes the normalized values into `metrics.json`.
@@ -254,7 +257,9 @@ Notes:
 - **A subscore the data cannot support is `null`, not 1.0.** It is listed in
   `metrics.json` → `unmeasured_subscores`, its weight is dropped, the remaining weights
   are renormalized, and the reason appears in `metrics.json` → `warnings` and on
-  `blabctl score`'s progress output. Today `on_axis_ripple` is always unmeasurable on the
+  `blabctl score`'s progress output. (`coverage` is unmeasurable only if you set no
+  target at all; per-axis, an untargeted axis is simply left out of the average.)
+  Today `on_axis_ripple` is always unmeasurable on the
   local BEAT/bempp backends: they apply flat-target normalization, which EQs the 0 deg
   response flat before the polars are written, so no on-axis ripple survives in
   `pressure_data_raw.npz`. That is why the example weights it `0` — weight it above 0

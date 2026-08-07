@@ -233,7 +233,13 @@ def compute_metrics(
             tolerance_deg,
         ),
     }
-    coverage_subscore = float(np.mean([coverage["horizontal"]["subscore"], coverage["vertical"]["subscore"]]))
+    # Average only the axes that were actually asked for. An omitted axis is not a
+    # perfect axis: averaging in a 1.0 for it would halve the penalty on the axis
+    # the campaign does care about (a requested axis scoring 0 would report 0.5).
+    scored_axes = [
+        coverage[axis]["subscore"] for axis in ("horizontal", "vertical") if coverage[axis]["subscore"] is not None
+    ]
+    coverage_subscore = float(np.mean(scored_axes)) if scored_axes else None
 
     di_smoothness = _di_smoothness(freq_hz, polar_angle_deg, horizontal_spl_db, vertical_spl_db, band_mask)
     on_axis_ripple = _on_axis_ripple(band_freqs, polar_angle_deg, horizontal_spl_db[band_mask])
@@ -249,7 +255,15 @@ def compute_metrics(
     # not be scored as 1.0, and its weight must not vanish silently either: it is
     # zeroed here, the remaining weights renormalize, and the reason is recorded.
     unmeasured = sorted(name for name, value in subscores.items() if value is None)
-    warnings = [section["reason"] for section in (on_axis_ripple,) if section.get("reason")]
+    warnings = []
+    if coverage_subscore is None:
+        warnings.append(
+            "coverage is not measurable: objective.coverage sets neither horizontal_target_deg nor "
+            "vertical_target_deg, so there is no beamwidth target to score against. The term was dropped "
+            "from the weighted score (not awarded 1.0); set a target, or set its weight to 0 in the spec."
+        )
+    if on_axis_ripple["reason"]:
+        warnings.append(on_axis_ripple["reason"])
     weights = _normalized_weights(objective.get("weights"), unmeasured=unmeasured)
     score = float(sum(weights[name] * subscores[name] for name in weights if subscores[name] is not None))
 
@@ -291,7 +305,9 @@ def _coverage_axis(
         "within_tolerance_fraction": None,
         "n_freqs": int(beamwidths.size),
         "n_valid": int(finite.sum()),
-        "subscore": 1.0,
+        # None, not 1.0: an axis with no target is *unscored*, and compute_metrics
+        # leaves it out of the coverage average rather than treating it as perfect.
+        "subscore": None,
         "freq_hz": band_freqs,
         "beamwidth_deg": beamwidths,
     }
