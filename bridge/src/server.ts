@@ -82,7 +82,7 @@ app.post("/api/generate", (req, res) => {
 });
 
 app.post("/api/solve", (req, res) => {
-  const { meshRunId, name, fmin, fmax, count, backend, symmetry } = req.body ?? {};
+  const { meshRunId, name, fmin, fmax, count, backend, symmetry, target } = req.body ?? {};
   if (typeof meshRunId !== "string") return fail(res, new actions.ActionError("meshRunId (string) is required"));
   const num = (v: unknown, label: string): number | undefined => {
     if (v === undefined || v === null) return undefined;
@@ -101,6 +101,8 @@ app.post("/api/solve", (req, res) => {
           count: num(count, "count"),
           backend: typeof backend === "string" ? backend : undefined,
           symmetry: typeof symmetry === "string" ? symmetry : undefined,
+          // "local" (default), "vast:<instanceId>", or an explicit server URL.
+          target: typeof target === "string" ? target : undefined,
         },
       }),
     );

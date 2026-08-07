@@ -58,6 +58,16 @@ outright with `403`. Nothing rents or destroys automatically, ever. Note that
 | `VAST_REPO_URL` / `VAST_REPO_REF` | this repo / `main` | source the instance clones |
 | `VAST_CACHE_ROOT` | `/workspace/blab` | persistent path caching venv + Julia depot |
 
+**Running a solve on one.** Once an instance is provisioned and healthy, pass its target
+id to a solve: `POST /api/solve {"meshRunId":"abc123","target":"vast:20250806"}`, or the
+`target` argument of the MCP `solve` tool. `GET /api/vast/targets` (or the MCP
+`list_compute_targets`) lists what is selectable. `target` also accepts `"local"` (the
+default) and a bare `http://host:port` for any `blab server` this bridge does not manage.
+Under the hood the run is dispatched as `blabctl solve --backend server --server-url ...`,
+which inlines the config and mesh into the request — no shared filesystem needed. A
+target that is not provisioned and healthy is refused when the solve is submitted, rather
+than failing an hour later.
+
 **Provisioning** pipes `provision/vast_bootstrap.sh` over SSH and runs it. The script is
 idempotent: each slow stage (apt, repo, python, julia) is stamped with a fingerprint of
 its inputs, so re-provisioning a reused instance skips straight to restarting the

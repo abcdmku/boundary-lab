@@ -285,6 +285,30 @@ test("destroying needs confirmation and reports the estimated spend", async () =
   assert.equal(registry.get(20250806)?.status, "destroyed");
 });
 
+test("provisioning is refused while a run is already in flight", async () => {
+  useUpstream(rentRoutes());
+  // `starting` is the first 15 minutes of a provisioning run (waiting for the
+  // box to boot). A retry in that window would launch a second detached
+  // bootstrap against the same instance: two apt/Julia installs and two server
+  // restarts racing each other.
+  for (const status of ["starting", "provisioning"] as const) {
+    reset();
+    seed({ status });
+    const { status: code, body } = await api("POST", "/api/vast/instances/20250806/provision");
+    assert.equal(code, 409, status);
+    assert.match(String(body.error), /already being provisioned/);
+  }
+});
+
+test("provisioning a destroyed instance is refused", async () => {
+  reset();
+  seed({ status: "destroyed" });
+  useUpstream(rentRoutes());
+  const { status, body } = await api("POST", "/api/vast/instances/20250806/provision");
+  assert.equal(status, 409);
+  assert.match(String(body.error), /has been destroyed/);
+});
+
 test("acting on an unknown instance is a 404", async () => {
   reset();
   useUpstream(rentRoutes());

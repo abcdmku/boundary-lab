@@ -168,7 +168,8 @@ function fileStem(name: string): string {
   return slug.length > 0 ? slug : "case";
 }
 
-function buildArgs(run: store.Run): string[] {
+/** Exported for tests: the argv is the dispatch contract with blabctl. */
+export function buildArgs(run: store.Run): string[] {
   const dir = store.runDir(run.id);
   if (run.kind === "mesh") {
     // blabctl takes params as a JSON file, not inline.
@@ -186,18 +187,32 @@ function buildArgs(run: store.Run): string[] {
       fileStem(run.name),
     ];
   }
-  // solve: params = { meshRunId, fmin?, fmax?, count?, backend?, symmetry? }
+  // solve: params = { meshRunId, fmin?, fmax?, count?, backend?, symmetry?,
+  //                   target?, serverUrl? }
+  //
+  // A serverUrl means the solve runs on another machine (a rented vast.ai GPU,
+  // or any reachable `blab server`): blabctl inlines the config and mesh into
+  // the request and streams results back, so no shared filesystem is needed.
+  // blabctl rejects --server-url unless the backend is `server`, and the local
+  // Julia path is meaningless there, so both are handled explicitly.
+  const serverUrl = typeof run.params.serverUrl === "string" ? run.params.serverUrl : null;
   const args = [
     "solve",
     "--mesh-run",
     store.runDir(String(run.params.meshRunId)),
     "--out",
     dir,
-    // Only pass an explicit Julia when configured — otherwise let blabctl's
-    // own resolution (env, known install, PATH) find it.
-    ...(config.juliaExecutable ? ["--julia-exe", config.juliaExecutable] : []),
+    ...(serverUrl
+      ? ["--backend", "server", "--server-url", serverUrl]
+      : // Only pass an explicit Julia when configured — otherwise let blabctl's
+        // own resolution (env, known install, PATH) find it.
+        config.juliaExecutable
+        ? ["--julia-exe", config.juliaExecutable]
+        : []),
   ];
   for (const key of ["fmin", "fmax", "count", "backend", "symmetry"] as const) {
+    // backend is already fixed to `server` for a remote solve.
+    if (serverUrl && key === "backend") continue;
     const value = run.params[key];
     if (value !== undefined && value !== null) args.push(`--${key}`, String(value));
   }

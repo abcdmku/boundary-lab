@@ -373,9 +373,14 @@ vastRouter.post("/instances/:id/provision", (req, res) => {
   try {
     const id = instanceId(req.params.id);
     const entry = requireEntry(id);
-    if (entry.status === "provisioning")
-      throw new VastRouteError(`instance ${id} is already provisioning`, 409);
     if (entry.status === "destroyed") throw new VastRouteError(`instance ${id} has been destroyed`, 409);
+    // `starting` counts as in-flight: provisioning spends up to 15 minutes
+    // there waiting for first boot, and a retry during that window would run a
+    // second detached bootstrap against the same box — two apt/Julia installs
+    // and two server restarts racing each other. The authoritative guard is
+    // the in-flight set, which also covers a status write that has not landed.
+    if (provisioningNow.has(id) || entry.status === "provisioning" || entry.status === "starting")
+      throw new VastRouteError(`instance ${id} is already being provisioned`, 409);
     const input = body(req);
     const options: ProvisionOptions = {
       force: input.force === true,
@@ -394,15 +399,28 @@ vastRouter.post("/instances/:id/provision", (req, res) => {
   }
 });
 
+/**
+ * Instances with a provisioning run in flight right now. The registry status
+ * alone is not a sufficient guard: it is persisted asynchronously and passes
+ * through several values during a run, so this in-memory set is the
+ * authoritative "is one already going" answer. In-memory is correct here — a
+ * bridge restart kills the SSH child with it, so nothing is in flight after one.
+ */
+const provisioningNow = new Set<number>();
+
 /** Detached provisioning run. Failures land on the registry entry, not here. */
 function startProvisioning(id: number, options: ProvisionOptions) {
   const vast = VastClient.tryCreate();
   if (!vast) return;
   const entry = registry.get(id);
   if (!entry) return;
-  void provisionInstance(vast, entry, options).catch((err) => {
-    console.error(`[bridge] vast provisioning for instance ${id} failed: ${err}`);
-  });
+  if (provisioningNow.has(id)) return;
+  provisioningNow.add(id);
+  void provisionInstance(vast, entry, options)
+    .catch((err) => {
+      console.error(`[bridge] vast provisioning for instance ${id} failed: ${err}`);
+    })
+    .finally(() => provisioningNow.delete(id));
 }
 
 // ---------------------------------------------------------------------------

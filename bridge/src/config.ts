@@ -1,6 +1,24 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+/**
+ * Parse a numeric env var that must be finite and positive, falling back to a
+ * safe default with a loud warning. Used for the knobs where a silently-NaN
+ * value would disable a safety check rather than merely misconfigure it.
+ */
+export function positiveNumber(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[bridge] ${name}="${raw}" is not a positive number — falling back to ${fallback}. ` +
+        `Fix the value; leaving it invalid would disable the limit it configures.`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 const bridgeRoot = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const port = Number(process.env.PORT ?? 4821);
 const repoRoot = process.env.REPO_ROOT ?? path.resolve(bridgeRoot, "..");
@@ -59,8 +77,12 @@ export const config = {
      * outright, before any confirmation is even considered — a second line of
      * defence behind the mandatory `confirm` flag against a fat-fingered
      * offer id landing on an 8×H100 box.
+     *
+     * Parsed defensively: a typo'd VAST_MAX_PRICE_PER_HOUR must never become
+     * NaN, because every `price > NaN` comparison is false and the ceiling
+     * would silently disappear — the exact opposite of what setting it means.
      */
-    maxPricePerHour: Number(process.env.VAST_MAX_PRICE_PER_HOUR ?? 2.0),
+    maxPricePerHour: positiveNumber(process.env.VAST_MAX_PRICE_PER_HOUR, 2.0, "VAST_MAX_PRICE_PER_HOUR"),
     /** Default docker image for rented solve boxes (CUDA runtime + Ubuntu). */
     image: process.env.VAST_IMAGE ?? "nvidia/cuda:12.6.3-runtime-ubuntu24.04",
     /** Default disk to request, GB. Julia depot + CUDA artifacts need ~30 GB. */
