@@ -302,23 +302,27 @@ your t3 thread and solve completions wake you up.
 `target` on any tool is the same union as the HTTP API: a string id/URL, or
 `{type, instanceId?, serverUrl?}`.
 
-## Solving on another machine
-
-`blabctl solve --backend server --server-url http://<host>:8765` sends the whole
-job (config + mesh, inlined) to a `blab server` elsewhere and streams results
-back, so a rented GPU box needs no shared filesystem. `blabctl remote-check
---server-url ...` preflights one: reachability, which solver it runs, whether it
-accepts symmetry-reduced meshes, and its GPU/VRAM. `BLAB_SERVER_URL` and
-`BLAB_SERVER_TOKEN` supply defaults. See `docs/Boundary Lab Server.md`.
-
 ## Adding a generator
 
 Drop a module in `py/generators/` exposing `SCHEMA` (id/title/description + JSON-Schema
 params) and `generate(params, out_dir, name, emit)`. It appears in the UI form builder
 and as an MCP `generate` target on next refresh — no server changes needed.
 
+## Solving on another machine
+
+`blabctl solve --backend server --server-url http://<host>:8765` sends the whole job
+(config + mesh, inlined) to a `blab server` elsewhere and streams results back, so a
+rented GPU box needs no shared filesystem. `blabctl remote-check --server-url …`
+preflights one: reachability, which solver it runs, whether it accepts
+symmetry-reduced meshes, and its GPU/VRAM. `BLAB_SERVER_URL` and `BLAB_SERVER_TOKEN`
+supply defaults. See `docs/Boundary Lab Server.md`.
+
+The bridge drives all of that through a job's `target`: pick a remote and the queue
+gives it its own lane and dispatches with `--backend server --server-url`.
+
 ## Adding remote compute
 
 Call `registerTargetProvider()` from `src/targets.ts` at startup with a function
-returning `ComputeTarget[]`. The vast.ai instance registry does exactly this; nothing
-else in the bridge needs to know about a specific cloud provider.
+returning `ComputeTarget[]`. The vast.ai instance registry does exactly this — its
+ready instances become selectable targets — and nothing else in the bridge needs to
+know about a specific cloud provider.
