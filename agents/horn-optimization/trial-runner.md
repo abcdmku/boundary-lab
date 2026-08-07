@@ -54,9 +54,12 @@ Gate — record a failure line (step d) and **skip the solve entirely** if any o
     willing to pay for the wall-clock;
   - `effective` < `spec.mesh.min_triangles` (default 3000) — anti-gaming floor: a solve
     this coarse produces flattering, untrustworthy scores;
-- `bboxMm` from the generate result exceeds `spec.size_limit_mm` (width, height, or
-  depth) — the scorer does not enforce the physical envelope, so an oversized design
-  would otherwise be free to become champion;
+- `bboxMm` from the generate result exceeds `spec.objective.size_limit_mm` (width,
+  height, or depth) — the scorer penalizes but does not refuse an oversized envelope, so
+  such a design would otherwise be free to become champion. `bboxMm` is the **outer**
+  box, which for `slot_cd_horn` is larger than `mouth_width`/`mouth_height` by the shell
+  margin (see `designer.md` → "Size budgeting"); the generate result also carries
+  `estimatedBboxMm`, the closed-form prediction of the same number;
 - `triangles` or `bboxMm` is null/missing — the gates cannot be verified;
 - `qualityWarning` is non-null in the generate result;
 - the generate job itself failed (record its `jobId` as `mesh_job_id` if one was
@@ -126,8 +129,18 @@ When the solve is `done`, from the repository root:
 python bridge/py/blabctl.py score --solve-run bridge/data/jobs/<solve_job_id> --mesh-run bridge/data/jobs/<mesh_job_id> --spec runs/campaigns/<name>/spec.json
 ```
 
+The campaign `spec.json` goes in **unchanged** — the scorer reads its `objective` block
+directly, so there is nothing to translate or duplicate. If it errors with
+`spec must contain an "objective" object`, the spec is malformed, not the solve: report
+the scorer's message (it names the exact shape) and record a failed trial; never edit a
+frozen spec yourself.
+
 This writes `metrics.json` (score, subscores, key metrics, per-frequency arrays) into the
-solve job directory. Then tell the bridge to pick up the new artifacts:
+solve job directory. A subscore that could not be measured from the data is `null` there,
+not 1.0 — it is named in `unmeasured_subscores`, its weight is dropped from the score,
+and the reason is in `warnings` (also printed as a `score` progress line). Copy the nulls
+through into `trials.jsonl` and mention any warning in the `note`; the trial is still
+`ok`. Then tell the bridge to pick up the new artifacts:
 
 ```
 curl -X POST http://127.0.0.1:4821/api/jobs/<solve_job_id>/rescan
@@ -145,11 +158,29 @@ only writer and trials are strictly sequential, so append-only is safe — but n
 rewrite existing lines, and keep the object on one line.
 
 ```
-{"trial": <n>, "ts": "<ISO-8601 UTC>", "stage": "<stage>", "params": {…}, "mesh_job_id": "…"|null, "solve_job_id": "…"|null, "triangles": <int>|null, "solve_settings": {…}|null, "score": <float>|null, "subscores": {…}|null, "key_metrics": {"h_bw_mean_deg": …, "v_bw_mean_deg": …, "h_bw_rms_dev": …, "v_bw_rms_dev": …, "spdi_rms_d2_db": …, "ripple_pp_db": …, "bbox_mm": […]}|null, "status": "ok"|"failed", "note": "…"}
+{"trial": <n>, "ts": "<ISO-8601 UTC>", "stage": "<stage>", "params": {…}, "mesh_job_id": "…"|null, "solve_job_id": "…"|null, "triangles": <int>|null, "solve_settings": {…}|null, "score": <float>|null, "subscores": {…}|null, "key_metrics": {"h_bw_mean_dev_deg": …, "v_bw_mean_dev_deg": …, "h_bw_rms_dev_deg": …, "v_bw_rms_dev_deg": …, "h_within_tol_fraction": …, "v_within_tol_fraction": …, "spdi_rms_d2_db": …, "ripple_pp_db": …, "bbox_mm": […]}|null, "status": "ok"|"failed", "note": "…"}
 ```
 
-- `score`, `subscores`, `key_metrics` come from the scorer's `metrics.json`; if an
-  individual `key_metrics` key is missing there, null that key, not the whole object.
+- `score` and `subscores` are copied from `metrics.json` verbatim (`subscores` keeps all
+  four keys `coverage`, `di_smoothness`, `on_axis_ripple`, `size`, nulls included).
+- `key_metrics` is a flat digest of `metrics.json`, one field per line below. If a source
+  field is missing or null, null that key — not the whole object.
+
+  | key_metrics key         | metrics.json path                                    |
+  | ----------------------- | ---------------------------------------------------- |
+  | `h_bw_mean_dev_deg`     | `coverage.horizontal.mean_dev_deg`                   |
+  | `v_bw_mean_dev_deg`     | `coverage.vertical.mean_dev_deg`                     |
+  | `h_bw_rms_dev_deg`      | `coverage.horizontal.rms_dev_deg`                    |
+  | `v_bw_rms_dev_deg`      | `coverage.vertical.rms_dev_deg`                      |
+  | `h_within_tol_fraction` | `coverage.horizontal.within_tolerance_fraction`      |
+  | `v_within_tol_fraction` | `coverage.vertical.within_tolerance_fraction`        |
+  | `spdi_rms_d2_db`        | `di_smoothness.spdi_rms_d2_db`                       |
+  | `ripple_pp_db`          | `on_axis_ripple.peak_to_peak_db` (null if unmeasured) |
+  | `bbox_mm`               | `[size.dimensions.width_mm, .height_mm, .depth_mm]`  |
+
+  The per-frequency arrays (`coverage.*.freq_hz` / `beamwidth_deg`, `di_smoothness.*`)
+  stay in `metrics.json` — the designer reads them there. Never copy them into a trial
+  line.
 - `solve_settings` is exactly the solve block used (`fmin`, `fmax`, `count`, `backend`,
   `symmetry`, and `target` when the spec set one) — `spec.solve_verify` for verify trials
   (the `stage` field marks which).

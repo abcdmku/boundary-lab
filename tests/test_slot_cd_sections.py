@@ -299,3 +299,82 @@ class TestTriangleEstimate:
         base = horn.estimate_triangles({})
         finer = horn.estimate_triangles({"angular_segments": 128})
         assert finer > 1.8 * base
+
+
+# ---------------------------------------------------------------------------
+# Outer bounding-box estimate
+#
+# mouth_width/mouth_height are the AIR aperture; the shell's rolled mouth lip
+# adds material on every side. A campaign trial was rejected by the size gate
+# because the designer budgeted 380 mm of mouth against a 450 mm limit and got a
+# 470 mm shell, so the relationship is pinned here (and documented in the schema
+# and in agents/horn-optimization/designer.md).
+# ---------------------------------------------------------------------------
+
+
+def built_bbox(params: dict) -> list[float]:
+    """[x, y, z] span of the mirrored mesh — what generators.mesh_stats reports."""
+    points, _triangles = build_full(params)
+    span = points.max(axis=0) - points.min(axis=0)
+    return [float(v) for v in span]
+
+
+class TestBboxEstimate:
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"plug": False},
+            {"mouth_roundover": 0},
+            {"roundover_sweep_deg": 30, "mouth_roundover": 30},
+            {"roundover_sweep_deg": 180, "mouth_roundover": 30},
+            {"pinch": 0.4, "flare_exp": 1.6, "mouth_superellipse_n": 6},
+            {"back": "enclosure"},
+            {"back": "enclosure", "enclosure_depth": 40},
+            {"wall_angle_deg": 30, "plug_angle_deg": 30, "slot_length": 80, "plug_tip_length": 18},
+        ],
+    )
+    def test_estimate_matches_built_mesh(self, params):
+        assert horn.estimate_bbox_mm(params) == pytest.approx(built_bbox(params), abs=1e-6)
+
+    def test_rejected_campaign_trial_is_predicted_exactly(self):
+        # runs/campaigns/smoke02 trial 3: generated 470.0 x 320.0 x 218.1 mm and
+        # was rejected against a 450 mm width limit.
+        params = {
+            "throat_diameter": 36,
+            "wall_angle_deg": 30,
+            "slot_width": 20,
+            "slot_length": 80,
+            "plug_angle_deg": 30,
+            "plug_tip_length": 18,
+            "mouth_width": 380,
+            "mouth_height": 230,
+            "flare_depth": 150,
+            "mouth_roundover": 30,
+            "roundover_sweep_deg": 120,
+            "wall_thickness": 6,
+        }
+        assert horn.estimate_bbox_mm(params) == pytest.approx([470.0, 320.0, 218.105], abs=1e-3)
+
+    def test_margin_is_roundover_at_quarter_round(self):
+        params = {"mouth_roundover": 25, "roundover_sweep_deg": 90, "wall_thickness": 6}
+        assert horn.mouth_to_outer_margin_mm(params) == pytest.approx(25.0)
+
+    def test_margin_is_twice_roundover_at_full_rollback(self):
+        params = {"mouth_roundover": 25, "roundover_sweep_deg": 180, "wall_thickness": 6}
+        assert horn.mouth_to_outer_margin_mm(params) == pytest.approx(50.0)
+
+    def test_margin_is_wall_thickness_without_roundover(self):
+        assert horn.mouth_to_outer_margin_mm({"mouth_roundover": 0, "wall_thickness": 6}) == pytest.approx(6.0)
+
+    def test_margin_never_below_wall_thickness(self):
+        for sweep in (30.0, 60.0, 90.0, 135.0, 180.0):
+            margin = horn.mouth_to_outer_margin_mm({"mouth_roundover": 8, "roundover_sweep_deg": sweep})
+            assert margin >= 6.0  # default wall_thickness
+
+    def test_enclosure_margin_used_for_box_back(self):
+        assert horn.mouth_to_outer_margin_mm({"back": "enclosure", "enclosure_margin": 30}) == pytest.approx(30.0)
+
+    def test_invalid_params_raise_before_meshing(self):
+        with pytest.raises(ValueError, match="slot_length must exceed throat_diameter"):
+            horn.estimate_bbox_mm({"slot_length": 40, "throat_diameter": 60})

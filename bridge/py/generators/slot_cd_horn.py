@@ -60,7 +60,12 @@ SCHEMA = {
         "axis (vertical slot: mouth_width sets horizontal coverage). Mesh units are mm. Built as a direct "
         "structured section loft in the +x/+y quadrant and mirrored, so solves can use --symmetry x or xy "
         "via reduced_msh_path. Adapter depth is derived: z_e = (slot_length/2 - throat_diameter/2) / "
-        "tan(wall_angle_deg). mouth_roundover is ignored when back='enclosure'."
+        "tan(wall_angle_deg). mouth_roundover is ignored when back='enclosure'. "
+        "OUTER BOUNDING BOX (mouth_width/mouth_height are the air aperture, the shell is larger): "
+        "margin = max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) per side, "
+        "c = 1 - cos(roundover_sweep_deg); bbox = [mouth_width + 2*margin, mouth_height + 2*margin, "
+        "z_e + flare_depth + mouth_roundover*max(sin(phi) for phi <= roundover_sweep_deg)]. "
+        "`blabctl estimate --generator slot_cd_horn --params p.json` returns it exactly without meshing."
     ),
     "params": {
         "type": "object",
@@ -145,21 +150,36 @@ SCHEMA = {
                 "default": 360,
                 "minimum": 40,
                 "maximum": 1000,
-                "description": "Mouth width in mm (x, horizontal coverage plane). Must be >= slot_width.",
+                "description": (
+                    "Mouth width in mm (x, horizontal coverage plane) — the AIR aperture, NOT the outer "
+                    "envelope. The shell adds a margin on every side: outer_width = mouth_width + 2*margin, "
+                    "margin = max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) "
+                    "with c = 1 - cos(roundover_sweep_deg) (margin = wall_thickness when mouth_roundover is "
+                    "0, = enclosure_margin when back='enclosure'). Budget for it against any size limit. "
+                    "Must be >= slot_width."
+                ),
             },
             "mouth_height": {
                 "type": "number",
                 "default": 240,
                 "minimum": 40,
                 "maximum": 800,
-                "description": "Mouth height in mm (y, vertical coverage plane). Must be >= slot_length.",
+                "description": (
+                    "Mouth height in mm (y, vertical coverage plane) — the AIR aperture, NOT the outer "
+                    "envelope: outer_height = mouth_height + 2*margin, same margin as mouth_width. "
+                    "Must be >= slot_length."
+                ),
             },
             "flare_depth": {
                 "type": "number",
                 "default": 120,
                 "minimum": 10,
                 "maximum": 500,
-                "description": "Axial depth of the CD flare in mm.",
+                "description": (
+                    "Axial depth of the CD flare in mm. Outer depth = z_e + flare_depth + "
+                    "mouth_roundover*max(sin(phi) for phi <= roundover_sweep_deg), with the derived adapter "
+                    "depth z_e = (slot_length/2 - throat_diameter/2)/tan(wall_angle_deg)."
+                ),
             },
             "mouth_superellipse_n": {
                 "type": "number",
@@ -194,14 +214,23 @@ SCHEMA = {
                 "default": 15,
                 "minimum": 0,
                 "maximum": 80,
-                "description": "Mouth roundover radius in mm (0 = sharp mouth; shell back needs 0 or > wall_thickness).",
+                "description": (
+                    "Mouth roundover radius in mm (0 = sharp mouth; shell back needs 0 or > wall_thickness). "
+                    "The rolled lip is what pushes the outer envelope past the mouth aperture — it dominates "
+                    "the per-side margin in the mouth_width formula, so raising it costs outer width AND "
+                    "height AND depth."
+                ),
             },
             "roundover_sweep_deg": {
                 "type": "number",
                 "default": 90,
                 "minimum": 30,
                 "maximum": 180,
-                "description": "Roundover sweep angle in degrees (90 = quarter round, 180 = full rollback).",
+                "description": (
+                    "Roundover sweep angle in degrees (90 = quarter round, 180 = full rollback). Sets "
+                    "c = 1 - cos(sweep) in the outer-margin formula: the per-side margin is ~mouth_roundover "
+                    "at 90 deg and 2*mouth_roundover at 180 deg."
+                ),
             },
             "back": {
                 "type": "string",
@@ -584,6 +613,59 @@ def estimate_triangles(params: dict) -> int:
     return 4 * quadrant
 
 
+def mouth_to_outer_margin_mm(params: dict) -> float:
+    """Per-side mm the shell adds outside the mouth aperture (back='shell').
+
+    ``mouth_width``/``mouth_height`` are the AIR aperture. The rolled mouth lip
+    reaches further out than either the bare mouth or the plain wall offset, so
+    the physical envelope is always larger than the mouth by this margin on every
+    side. Closed form (c = 1 - cos(roundover_sweep)):
+
+        margin = max(mouth_roundover * c, wall_thickness + (mouth_roundover - wall_thickness) * c)
+
+    which is ``mouth_roundover`` exactly at the default 90 deg sweep, grows to
+    ``2 * mouth_roundover`` at a 180 deg rollback, and collapses to
+    ``wall_thickness`` when ``mouth_roundover`` is 0.
+    """
+    p = _with_defaults(params)
+    if str(p["back"]) != "shell":
+        return float(p["enclosure_margin"])
+    thickness = float(p["wall_thickness"])
+    roundover = float(p["mouth_roundover"])
+    if roundover <= 0.0:
+        return thickness
+    c = 1.0 - math.cos(math.radians(float(p["roundover_sweep_deg"])))
+    return max(roundover * c, thickness + (roundover - thickness) * c)
+
+
+def estimate_bbox_mm(params: dict) -> list[float]:
+    """Closed-form outer bounding box [x, y, z] in mm, without building the mesh.
+
+    Exact (matches ``mesh_stats`` on the cleaned mesh to floating-point noise), so
+    a designer can check the size envelope before spending a trial. Validation is
+    the same as ``build_quadrant``: impossible parameter combinations raise here
+    too.
+
+        x = mouth_width  + 2 * margin        (see mouth_to_outer_margin_mm)
+        y = mouth_height + 2 * margin
+        z = z_e + flare_depth + mouth_roundover * max(sin(phi) for phi <= sweep)
+
+    with the derived adapter depth z_e = (slot_length/2 - throat_diameter/2) /
+    tan(wall_angle_deg). For back='enclosure' the margin is ``enclosure_margin``,
+    the roundover is ignored, and z is the clamped ``enclosure_depth``.
+    """
+    p = _with_defaults(params)
+    d = _derive(p)
+    margin = mouth_to_outer_margin_mm(p)
+    width = float(p["mouth_width"]) + 2.0 * margin
+    height = float(p["mouth_height"]) + 2.0 * margin
+    if str(p["back"]) != "shell":
+        return [width, height, float(d["depth_eff"])]
+    sweep = math.radians(float(p["roundover_sweep_deg"]))
+    lip_z = float(p["mouth_roundover"]) * (math.sin(sweep) if sweep <= math.pi / 2.0 else 1.0)
+    return [width, height, d["z_m"] + lip_z]
+
+
 def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None]) -> dict:
     import meshio
 
@@ -593,11 +675,15 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
 
     p = _with_defaults(params)
     estimate = estimate_triangles(p)
+    bbox_estimate = estimate_bbox_mm(p)
     emit(
         {
             "event": "progress",
             "stage": "sections",
-            "message": f"Assembling section loft (closed-form estimate: {estimate} triangles after mirroring)",
+            "message": (
+                f"Assembling section loft (closed-form estimate: {estimate} triangles after mirroring, "
+                f"outer bbox {bbox_estimate[0]:.1f}x{bbox_estimate[1]:.1f}x{bbox_estimate[2]:.1f} mm)"
+            ),
         }
     )
     points, triangles, tags = build_quadrant(p)
@@ -636,6 +722,7 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
         "triangles": triangle_count,
         "estimated_triangles": estimate,
         "bbox_mm": bbox_mm,
+        "estimated_bbox_mm": bbox_estimate,
         "driven_tag": DRIVEN_TAG,
         "radiators": [radiator_to_dict(radiator) for radiator in radiators],
         "quality_warning": quality_warning_text(warning if warning.has_warnings else None),

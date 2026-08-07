@@ -81,7 +81,8 @@ nothing, since creating the LOCK creates it):
 1. Interview the user for whatever is missing:
    - target coverage (horizontal × vertical, degrees),
    - frequency band of interest,
-   - size limits (mouth width/height, depth, mm),
+   - size limits (mm) — the **outer envelope** the finished horn must fit in, not the
+     mouth aperture; see `designer.md` → "Size budgeting",
    - iteration budget (max trials) and any target score,
    - anything fixed (throat diameter, driver, mounting constraints).
    For anything the user has no opinion on, use the defaults from the worked example
@@ -201,19 +202,27 @@ runs/campaigns/cd90x60/
 
 ### `spec.json` — worked example
 
+This file **is** the scorer's spec: the trial-runner passes it to
+`blabctl.py score --spec` unchanged, and `bridge/py/metrics.py` reads its `objective`
+block directly. There is no second scoring document and no duplicated copy of the
+objective — one canonical shape, pinned by `tests/test_bridge_metrics.py`, which parses
+this very example and scores with it.
+
 ```json
 {
   "name": "cd90x60",
   "created": "2026-08-06T14:00:00Z",
   "generator": "slot_cd_horn",
-  "objective": "Constant-directivity 90x60 horn: flat beamwidth across the band, smooth DI, minimal ripple",
-  "coverage": { "h_deg": 90, "v_deg": 60 },
-  "band_hz": { "fmin": 800, "fmax": 16000 },
-  "weights": { "h_bw": 1.0, "v_bw": 1.0, "smoothness": 0.5, "ripple": 0.5 },
-  "size_limit_mm": { "w": 400, "h": 250, "d": 300 },
-  "fixed_params": { "throat_diameter_mm": 25.4 },
+  "description": "Constant-directivity 90x60 horn: flat beamwidth across the band, smooth DI, minimal ripple",
+  "objective": {
+    "band_hz": [800, 16000],
+    "coverage": { "horizontal_target_deg": 90, "vertical_target_deg": 60, "tolerance_deg": 10 },
+    "weights": { "coverage": 1.0, "di_smoothness": 0.5, "on_axis_ripple": 0, "size": 0.25 },
+    "size_limit_mm": { "width": 400, "height": 250, "depth": 300 }
+  },
+  "fixed_params": { "throat_diameter": 36 },
   "mesh": { "max_triangles": 9000, "min_triangles": 3000, "verify_max_triangles": 14000 },
-  "mesh_verify_params": { "element_size_mm": 4 },
+  "mesh_verify_params": { "angular_segments": 96 },
   "solve": { "fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_verify": { "fmin": 500, "fmax": 20000, "count": 48, "backend": "beat_cuda", "symmetry": "xy" },
   "solve_timeout_min": 20,
@@ -224,10 +233,33 @@ runs/campaigns/cd90x60/
 
 Notes:
 
-- The scorer (`python bridge/py/blabctl.py score`) produces a scalar `score` normalized
-  to 0–1 (higher is better) and the subscores `h_bw`, `v_bw`, `smoothness`, `ripple`;
-  `weights` keys must use those names (copying them from this example is correct — it is
-  the scorer contract, unlike generator params, which must come from `list_generators`).
+- **`objective` is the scorer contract** — an object, never prose (put prose in
+  `description`). Copy its key names from this example verbatim; unlike generator params,
+  which must come from `list_generators`, these names are fixed by
+  `bridge/py/metrics.py`:
+  - `band_hz` — **a two-element `[lo, hi]` array**, not `{fmin, fmax}`. It is the
+    *scoring* band and is independent of the `solve` block's `fmin`/`fmax` (which is the
+    band actually solved); the scorer needs ≥ 3 solved frequencies inside it.
+  - `coverage` — `horizontal_target_deg`, `vertical_target_deg`, `tolerance_deg`
+    (default 10). Omit a target to leave that axis unscored.
+  - `weights` — exactly the four subscore names `coverage`, `di_smoothness`,
+    `on_axis_ripple`, `size`. Any positive scale works; the scorer normalizes them to
+    sum to 1 and echoes the normalized values into `metrics.json`.
+  - `size_limit_mm` — `width`/`height`/`depth`, each optional. These are the **outer
+    envelope**, which the generator's mouth dimensions do *not* equal (see
+    `designer.md` → "Size budgeting"); the trial-runner gates on the same numbers.
+- The scorer (`python bridge/py/blabctl.py score`) writes `metrics.json` into the solve
+  job directory: a scalar `score` normalized to 0–1 (higher is better), the four
+  `subscores` under those same names, per-frequency arrays, and a `provenance` block.
+- **A subscore the data cannot support is `null`, not 1.0.** It is listed in
+  `metrics.json` → `unmeasured_subscores`, its weight is dropped, the remaining weights
+  are renormalized, and the reason appears in `metrics.json` → `warnings` and on
+  `blabctl score`'s progress output. Today `on_axis_ripple` is always unmeasurable on the
+  local BEAT/bempp backends: they apply flat-target normalization, which EQs the 0 deg
+  response flat before the polars are written, so no on-axis ripple survives in
+  `pressure_data_raw.npz`. That is why the example weights it `0` — weight it above 0
+  only for a solve with flat-target normalization disabled, and expect it to drop out
+  otherwise.
 - `fixed_params` are merged into every proposal **by the designer** and must not be
   varied; the trial-runner passes the designer's params through verbatim.
 - `solve`/`solve_verify` fields map directly onto the `solve` MCP tool's arguments
@@ -245,10 +277,13 @@ Notes:
   below them refuses a mesh for being large — so `max_triangles` is really a wall-clock
   budget (iteration meshes stay small because that is what makes a campaign finish, not
   because a guard forbids more) and `min_triangles` is the anti-gaming floor. The
-  trial-runner also rejects meshes whose `bboxMm` exceeds `size_limit_mm`.
+  trial-runner also rejects meshes whose `bboxMm` exceeds `objective.size_limit_mm`. Both
+  gates are predictable before a trial is spent: `blabctl.py estimate --generator <id>
+  --params <file>` returns the same closed-form `estimated_triangles` and
+  `estimated_bbox_mm` the generator reports, in milliseconds and without a job.
 - `mesh_verify_params` are resolution-only parameter overrides (names must come from the
-  generator's schema; the value here is illustrative) applied on top of the champion's
-  params for the verification trial — they must refine the mesh, never change geometry.
+  generator's schema) applied on top of the champion's params for the verification trial
+  — they must refine the mesh, never change geometry.
   Set `verify_max_triangles` as high as the verify budget allows: generation imposes no
   size limit of its own. The one hardware constraint is GPU memory, and it is advisory —
   `generate` reports an estimated peak VRAM per symmetry option and `solve` warns
@@ -271,23 +306,28 @@ triangles      triangle count from generate (null if unavailable)
 solve_settings the solve settings used, copied from spec — fmin/fmax/count/backend/
                symmetry (+ target when set) (null if no solve started)
 score          scalar score from the scorer, higher is better — null on any failure
-subscores      per-objective subscores object from the scorer (null on failure)
-key_metrics    {h_bw_mean_deg, v_bw_mean_deg, h_bw_rms_dev, v_bw_rms_dev,
-                spdi_rms_d2_db, ripple_pp_db, bbox_mm} (null on failure)
+subscores      metrics.json's `subscores` object verbatim: coverage, di_smoothness,
+               on_axis_ripple, size (null on failure; an individual subscore is null
+               when that term was unmeasurable — see metrics.json's warnings)
+key_metrics    {h_bw_mean_dev_deg, v_bw_mean_dev_deg, h_bw_rms_dev_deg, v_bw_rms_dev_deg,
+                h_within_tol_fraction, v_within_tol_fraction, spdi_rms_d2_db,
+                ripple_pp_db, bbox_mm} (null on failure; see trial-runner.md for the
+                metrics.json field each one is copied from)
 status         "ok" | "failed"
 note           one short human sentence (what was tried / why it failed)
 ```
 
-Successful trial:
+Successful trial (generator params are `slot_cd_horn`'s; always take names from
+`list_generators`):
 
 ```json
-{"trial": 7, "ts": "2026-08-06T15:42:10Z", "stage": "refine", "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "triangles": 7420, "solve_settings": {"fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy"}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "key_metrics": {"h_bw_mean_deg": 88.2, "v_bw_mean_deg": 57.5, "h_bw_rms_dev": 4.1, "v_bw_rms_dev": 6.3, "spdi_rms_d2_db": 0.9, "ripple_pp_db": 2.1, "bbox_mm": [320, 180, 240]}, "status": "ok", "note": "wider mouth for LF pattern control, slot unchanged"}
+{"trial": 7, "ts": "2026-08-06T15:42:10Z", "stage": "refine", "params": {"mouth_width": 320, "mouth_height": 180, "slot_length": 60, "throat_diameter": 36}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "triangles": 7420, "solve_settings": {"fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy"}, "score": 0.842, "subscores": {"coverage": 0.88, "di_smoothness": 0.78, "on_axis_ripple": null, "size": 1.0}, "key_metrics": {"h_bw_mean_dev_deg": -1.8, "v_bw_mean_dev_deg": -2.5, "h_bw_rms_dev_deg": 4.1, "v_bw_rms_dev_deg": 6.3, "h_within_tol_fraction": 0.92, "v_within_tol_fraction": 0.79, "spdi_rms_d2_db": 0.9, "ripple_pp_db": null, "bbox_mm": [350, 210, 240]}, "status": "ok", "note": "wider mouth for LF pattern control, slot unchanged"}
 ```
 
 Failed trial (mesh gate — solve never started):
 
 ```json
-{"trial": 8, "ts": "2026-08-06T15:49:02Z", "stage": "refine", "params": {"mouth_width_mm": 380, "mouth_height_mm": 220, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_job_id": "r_g7h8i9", "solve_job_id": null, "triangles": 11250, "solve_settings": null, "score": null, "subscores": null, "key_metrics": null, "status": "failed", "note": "mesh 11250 triangles > max 9000 — solve skipped"}
+{"trial": 8, "ts": "2026-08-06T15:49:02Z", "stage": "refine", "params": {"mouth_width": 380, "mouth_height": 220, "slot_length": 60, "throat_diameter": 36}, "mesh_job_id": "r_g7h8i9", "solve_job_id": null, "triangles": 11250, "solve_settings": null, "score": null, "subscores": null, "key_metrics": null, "status": "failed", "note": "mesh 11250 triangles > max 9000 — solve skipped"}
 ```
 
 Failures always carry `score: null` — never `0`, which would poison score statistics.
@@ -308,7 +348,7 @@ appends are safe.
 ### `best.json` — example
 
 ```json
-{"trial": 7, "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "verified": false}
+{"trial": 7, "params": {"mouth_width": 320, "mouth_height": 180, "slot_length": 60, "throat_diameter": 36}, "score": 0.842, "subscores": {"coverage": 0.88, "di_smoothness": 0.78, "on_axis_ripple": null, "size": 1.0}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "verified": false}
 ```
 
 `trial` stays the champion's iteration trial number; verification only flips `verified`.

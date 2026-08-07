@@ -186,6 +186,28 @@ def cmd_generate(args: argparse.Namespace) -> dict:
     return result
 
 
+def cmd_estimate(args: argparse.Namespace) -> dict:
+    """Closed-form dry run: triangle count and outer bbox without building a mesh.
+
+    Lets a designer check a proposal against a campaign's triangle and
+    size_limit_mm gates before spending a trial on it. Parameter validation is
+    the generator's own, so an impossible combination fails here exactly as it
+    would in `generate` — just in milliseconds and with no job.
+    """
+    from generators import apply_defaults, load_generator
+
+    generator = load_generator(args.generator)
+    raw_params = json.loads(Path(args.params).read_text(encoding="utf-8")) if args.params else {}
+    params = apply_defaults(raw_params, generator.SCHEMA)
+    result: dict = {"generator": args.generator, "params": params}
+    for key, func in (("estimated_triangles", "estimate_triangles"), ("estimated_bbox_mm", "estimate_bbox_mm")):
+        estimator = getattr(generator, func, None)
+        result[key] = estimator(params) if estimator is not None else None
+    if result["estimated_bbox_mm"] is None:
+        progress("estimate", f"{args.generator} has no closed-form bbox estimator; generate to learn its size")
+    return result
+
+
 def cmd_preview(args: argparse.Namespace) -> dict:
     from generators import mesh_stats
     from preview import render_mesh_preview
@@ -565,6 +587,10 @@ def cmd_score(args: argparse.Namespace) -> dict:
 
     progress("score", f"Scoring {raw_npz.name}")
     result = metrics_mod.compute_metrics(raw_npz, spec, mesh_result=mesh_result, solve_result=solve_result)
+    # Unmeasurable subscores are null and drop out of the weighted score; say so
+    # here so a campaign never silently optimizes against fewer terms than asked.
+    for warning in result.get("warnings") or []:
+        progress("score", warning)
 
     out_dirs = [solve_run]
     if args.out:
@@ -620,6 +646,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_generate.add_argument("--out", required=True, help="Run directory for all outputs")
     p_generate.add_argument("--name", default="case", type=safe_name)
 
+    p_estimate = sub.add_parser(
+        "estimate",
+        help="Closed-form triangle count and outer bounding box for a params set, without meshing.",
+    )
+    p_estimate.add_argument("--generator", required=True)
+    p_estimate.add_argument("--params", default=None, help="Path to a params JSON file (defaults apply if omitted)")
+
     p_solve = sub.add_parser("solve", help="Solve a generated mesh and produce plots.")
     p_solve.add_argument("--mesh-run", required=True, help="Directory containing result.json from generate")
     p_solve.add_argument("--out", required=True)
@@ -643,9 +676,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_server_arguments(p_remote_check)
 
-    p_score = sub.add_parser("score", help="Score a completed solve run against an objective spec.")
+    p_score = sub.add_parser("score", help="Score a completed solve run against a campaign spec.")
     p_score.add_argument("--solve-run", required=True, help="Directory containing result.json from solve")
-    p_score.add_argument("--spec", required=True, help="Path to the objective spec JSON")
+    p_score.add_argument(
+        "--spec",
+        required=True,
+        help=(
+            "Path to the campaign spec JSON (runs/campaigns/<name>/spec.json, passed through unchanged). "
+            'Only its "objective" object is read: {"band_hz": [lo, hi], "coverage": '
+            '{horizontal_target_deg, vertical_target_deg, tolerance_deg}, "weights": {coverage, '
+            'di_smoothness, on_axis_ripple, size}, "size_limit_mm": {width, height, depth}}'
+        ),
+    )
     p_score.add_argument(
         "--mesh-run", default=None, help="Mesh run directory (default: derived from the solve config.toml)"
     )
@@ -661,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "list-generators": cmd_list_generators,
     "generate": cmd_generate,
+    "estimate": cmd_estimate,
     "solve": cmd_solve,
     "score": cmd_score,
     "preview": cmd_preview,

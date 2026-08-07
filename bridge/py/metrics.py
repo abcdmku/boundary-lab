@@ -2,7 +2,7 @@
 
 Pure numpy scoring library plus two matplotlib plot helpers. The entry point is
 :func:`compute_metrics`, which loads a solve run's ``pressure_data_raw.npz`` and
-an objective spec and returns a JSON-serializable metrics dict:
+a campaign spec and returns a JSON-serializable metrics dict:
 
 - ``coverage``: per-frequency connected -6 dB beamwidth (horizontal/vertical)
   vs target, with mean/RMS deviation, within-tolerance fraction, and subscore.
@@ -15,10 +15,44 @@ Every subscore uses the same squashing ``1 / (1 + (x / scale) ** 2)`` so 1.0 is
 perfect and 0.5 means "off by one scale unit" (scale = tolerance_deg for
 coverage, 2.0 dB for DI smoothness, 1.0 dB for ripple).
 
-The spec is permissive: missing targets, weights, tolerances, or size limits
-fall back to defaults rather than failing, so old runs can be re-scored with
-partial specs. A ``provenance`` block records solve settings and triangle count
-so trials at different fidelity are never silently compared.
+The spec
+--------
+
+``spec`` is the campaign's own ``spec.json``, passed through unchanged — there is
+no second, scorer-only document to keep in sync. Everything the scorer reads
+lives under one key, ``objective`` (canonical shape, all members optional):
+
+.. code-block:: json
+
+    {"objective": {
+       "band_hz": [1000, 8000],
+       "coverage": {"horizontal_target_deg": 100, "vertical_target_deg": 40,
+                    "tolerance_deg": 10},
+       "weights": {"coverage": 1.0, "di_smoothness": 0.5,
+                   "on_axis_ripple": 0.5, "size": 0.25},
+       "size_limit_mm": {"width": 450, "height": 350, "depth": 350}}}
+
+Weight names are exactly the subscore names, so a spec's ``weights`` and a
+``metrics.json``'s ``subscores`` share one vocabulary. Human prose about the
+campaign belongs in a top-level ``description`` — ``objective`` is an object.
+Sibling keys (``generator``, ``mesh``, ``solve``, ``budget``, …) are ignored
+here; see ``agents/horn-optimization/orchestrator.md`` for the full spec, whose
+worked example is pinned to this module by ``tests/test_bridge_metrics.py``.
+
+The objective block itself is permissive: missing targets, weights, tolerances,
+or size limits fall back to defaults rather than failing, so old runs can be
+re-scored with partial specs. A ``provenance`` block records solve settings and
+triangle count so trials at different fidelity are never silently compared.
+
+Unmeasurable subscores
+----------------------
+
+A subscore that cannot be measured from the data is reported as ``null`` (never
+1.0 — a metric that always returns perfect is worse than no metric). Its weight
+is dropped and the remaining weights renormalized, the term is listed in
+``unmeasured_subscores``, and the reason is spelled out in ``warnings``. See
+:func:`_on_axis_ripple`, which is unmeasurable whenever the solve emits
+level-normalized on-axis SPL.
 """
 
 from __future__ import annotations
@@ -38,11 +72,27 @@ DI_SMOOTHNESS_SCALE_DB = 2.0
 # stay comparable across solves with different --count (see log_curvature_rms_db).
 REFERENCE_POINTS_PER_DECADE = 32
 RIPPLE_SCALE_DB = 1.0
+# An on-axis cut whose in-band span is below this is level-normalized by
+# construction, not a genuinely ruler-flat horn (see _on_axis_ripple).
+FLAT_ON_AXIS_SPAN_DB = 1e-3
 DEFAULT_WEIGHTS = {
     "coverage": 0.4,
     "di_smoothness": 0.3,
     "on_axis_ripple": 0.2,
     "size": 0.1,
+}
+
+# Flat campaign-spec keys from the pre-canonical playbook example, mapped to the
+# canonical objective member they were trying to express. Used only to make the
+# error message actionable when an old spec shows up.
+_LEGACY_SPEC_KEYS = {
+    "band_hz": 'objective.band_hz: [lo, hi] (not {"fmin": …, "fmax": …})',
+    "coverage": 'objective.coverage: {"horizontal_target_deg": …, "vertical_target_deg": …, '
+    '"tolerance_deg": …} (not {"h_deg": …, "v_deg": …})',
+    "weights": 'objective.weights: {"coverage": …, "di_smoothness": …, "on_axis_ripple": …, '
+    '"size": …} (not {"h_bw": …, "v_bw": …, "smoothness": …, "ripple": …})',
+    "size_limit_mm": 'objective.size_limit_mm: {"width": …, "height": …, "depth": …} '
+    '(not {"w": …, "h": …, "d": …})',
 }
 
 # Categorical series colors (CVD-safe blue/orange pair, >=3:1 on white).
@@ -88,16 +138,48 @@ def connected_beamwidth(angle_deg: np.ndarray, response_db: np.ndarray, level: f
     return float(right - left)
 
 
+def objective_of(spec: dict) -> dict:
+    """Return the canonical ``objective`` block of a campaign spec.
+
+    The campaign ``spec.json`` is passed to the scorer unchanged, so this is the
+    one place where "which part of the spec is the objective" is decided. Raises
+    a migration-shaped ValueError for the pre-canonical flat layout and for the
+    prose-in-``objective`` mistake, because both used to fail with an error that
+    did not say what to write instead.
+    """
+    objective = spec.get("objective")
+    if isinstance(objective, dict):
+        return objective
+
+    lines = [
+        'spec must contain an "objective" object. Canonical campaign-spec shape '
+        "(see agents/horn-optimization/orchestrator.md):",
+        '  "objective": {"band_hz": [lo, hi], '
+        '"coverage": {"horizontal_target_deg": …, "vertical_target_deg": …, "tolerance_deg": …}, '
+        '"weights": {"coverage": …, "di_smoothness": …, "on_axis_ripple": …, "size": …}, '
+        '"size_limit_mm": {"width": …, "height": …, "depth": …}}',
+    ]
+    if isinstance(objective, str):
+        excerpt = objective if len(objective) <= 60 else objective[:60] + "…"
+        lines.append(
+            f"Found a string at spec.objective ({excerpt!r}): prose describing the campaign belongs in a "
+            'top-level "description" key; "objective" is the scored block.'
+        )
+    stale = [hint for key, hint in _LEGACY_SPEC_KEYS.items() if key in spec]
+    if stale:
+        lines.append("This spec uses the superseded flat layout. Move these into objective:")
+        lines.extend(f"  - {hint}" for hint in stale)
+    raise ValueError("\n".join(lines))
+
+
 def compute_metrics(
     raw_npz_path: str | Path,
     spec: dict,
     mesh_result: dict | None = None,
     solve_result: dict | None = None,
 ) -> dict:
-    """Score a solve run's raw NPZ against an objective spec (schema v2)."""
-    objective = spec.get("objective")
-    if not isinstance(objective, dict):
-        raise ValueError('spec must contain an "objective" object (band_hz, coverage targets, weights, ...).')
+    """Score a solve run's raw NPZ against a campaign spec (metrics schema v2)."""
+    objective = objective_of(spec)
 
     with np.load(Path(raw_npz_path)) as data:
         freq_hz = np.asarray(data["freq_hz"], dtype=float)
@@ -163,8 +245,13 @@ def compute_metrics(
         "on_axis_ripple": on_axis_ripple["subscore"],
         "size": size["subscore"],
     }
-    weights = _normalized_weights(objective.get("weights"))
-    score = float(sum(weights[name] * subscores[name] for name in weights))
+    # A subscore of None means "not measurable from this data". Such a term must
+    # not be scored as 1.0, and its weight must not vanish silently either: it is
+    # zeroed here, the remaining weights renormalize, and the reason is recorded.
+    unmeasured = sorted(name for name, value in subscores.items() if value is None)
+    warnings = [section["reason"] for section in (on_axis_ripple,) if section.get("reason")]
+    weights = _normalized_weights(objective.get("weights"), unmeasured=unmeasured)
+    score = float(sum(weights[name] * subscores[name] for name in weights if subscores[name] is not None))
 
     metrics = {
         "schema_version": SCHEMA_VERSION,
@@ -174,7 +261,9 @@ def compute_metrics(
         "on_axis_ripple": on_axis_ripple,
         "size": size,
         "subscores": subscores,
+        "unmeasured_subscores": unmeasured,
         "weights": weights,
+        "warnings": warnings,
         "score": score,
         "provenance": _provenance(mesh_result, solve_result),
     }
@@ -273,16 +362,53 @@ def _di_smoothness(
 
 
 def _on_axis_ripple(band_freqs: np.ndarray, polar_angle_deg: np.ndarray, horizontal_band: np.ndarray) -> dict:
+    """Ripple of the 0 deg cut of ``horizontal_spl_db``, detrended in log10(f).
+
+    ``horizontal_spl_db`` is the un-*polar*-normalized array (the companion
+    ``horizontal_spl_norm_db`` is referenced to the on-axis sample, so its 0 deg
+    column is identically zero and useless here). But the solve pipeline also
+    applies *flat-target* normalization by default — a per-frequency drive
+    correction that sets the on-axis pressure to a fixed level — and that leaves
+    the 0 deg column of ``horizontal_spl_db`` constant too, i.e. flat by
+    construction rather than by merit.
+
+    There is no third, un-flat-targeted on-axis array in ``pressure_data_raw.npz``,
+    so when the cut is flat to within ``FLAT_ON_AXIS_SPAN_DB`` this returns
+    ``subscore: None`` with a reason instead of the free 1.0 the detrended fit
+    would otherwise produce. compute_metrics then drops the term from the
+    weighted score and reports it in ``unmeasured_subscores``/``warnings``.
+    """
     on_axis_col = int(np.argmin(np.abs(np.asarray(polar_angle_deg, dtype=float))))
-    on_axis = horizontal_band[:, on_axis_col]
+    on_axis = np.asarray(horizontal_band, dtype=float)[:, on_axis_col]
+    span = float(on_axis.max() - on_axis.min())
+    if not math.isfinite(span) or span <= FLAT_ON_AXIS_SPAN_DB:
+        return {
+            "measured": False,
+            "on_axis_span_db": span,
+            "peak_to_peak_db": None,
+            "rms_db": None,
+            "subscore": None,
+            "reason": (
+                f"on_axis_ripple is not measurable: the 0 deg cut of horizontal_spl_db spans {span:.2e} dB "
+                f"over the band (<= {FLAT_ON_AXIS_SPAN_DB:g} dB), i.e. it is level-normalized by construction. "
+                "This solve used flat-target normalization (blab.config "
+                "SimulationConfig.flat_target_normalization_enabled, on by default), which EQs the on-axis "
+                "response flat before the polars are written, so no on-axis ripple survives in the NPZ. "
+                "The term was dropped from the weighted score (not awarded 1.0); re-solve with flat-target "
+                "normalization disabled to score it, or set its weight to 0 in the spec."
+            ),
+        }
     log_f = np.log10(band_freqs)
     slope, intercept = np.polyfit(log_f, on_axis, 1)
     residual = on_axis - (slope * log_f + intercept)
     rms = float(np.sqrt(np.mean(residual**2)))
     return {
+        "measured": True,
+        "on_axis_span_db": span,
         "peak_to_peak_db": float(residual.max() - residual.min()),
         "rms_db": rms,
         "subscore": _subscore(rms, RIPPLE_SCALE_DB),
+        "reason": None,
     }
 
 
@@ -317,7 +443,8 @@ def _size_penalty(size_limit_mm: dict | None, mesh_result: dict | None) -> dict:
     return {"penalty": penalty, "subscore": float(1.0 / (1.0 + penalty)), "dimensions": dimensions}
 
 
-def _normalized_weights(spec_weights: dict | None) -> dict:
+def _normalized_weights(spec_weights: dict | None, unmeasured: list[str] | tuple[str, ...] = ()) -> dict:
+    """Validate spec weights, zero the unmeasurable terms, renormalize to 1."""
     merged = dict(DEFAULT_WEIGHTS)
     for name, value in (spec_weights or {}).items():
         if name in merged:
@@ -325,9 +452,18 @@ def _normalized_weights(spec_weights: dict | None) -> dict:
     for name, value in merged.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"objective.weights.{name} must be a finite, nonnegative number (got {value!r}).")
+    requested_total = sum(merged.values())
+    if requested_total <= 0:
+        raise ValueError("objective.weights must sum to a positive value.")
+    for name in unmeasured:
+        merged[name] = 0.0
     total = sum(merged.values())
     if total <= 0:
-        raise ValueError("objective.weights must sum to a positive value.")
+        raise ValueError(
+            "every weighted subscore is unmeasurable for this solve "
+            f"({', '.join(unmeasured)}); no score can be computed. Re-weight the objective, or fix the "
+            "solve settings named in the metrics warnings."
+        )
     return {name: value / total for name, value in merged.items()}
 
 

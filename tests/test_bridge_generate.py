@@ -127,3 +127,49 @@ def test_allow_large_is_accepted_as_a_no_op(stubbed_generate):
 def test_unknown_params_are_still_rejected(stubbed_generate):
     with pytest.raises(ValueError, match="Unknown params"):
         stubbed_generate(1_000, params={"not_a_real_param": 1})
+
+
+# --- blabctl estimate: closed-form dry run, no mesh, no job ----------------
+
+
+def _estimate_args(tmp_path: Path, generator: str, params: dict | None) -> argparse.Namespace:
+    params_path = None
+    if params is not None:
+        params_path = tmp_path / "estimate_params.json"
+        params_path.write_text(json.dumps(params), encoding="utf-8")
+    return argparse.Namespace(generator=generator, params=str(params_path) if params_path else None)
+
+
+def test_estimate_returns_triangles_and_bbox_without_meshing(tmp_path):
+    """A designer can check the triangle and size gates before spending a trial."""
+    result = blabctl.cmd_estimate(_estimate_args(tmp_path, "slot_cd_horn", {"mouth_width": 380}))
+    assert result["generator"] == "slot_cd_horn"
+    assert result["estimated_triangles"] > 0
+    width, height, depth = result["estimated_bbox_mm"]
+    # mouth_width is the air aperture; the shell lip adds the default 15 mm
+    # roundover on each side at the default 90 deg sweep.
+    assert width == pytest.approx(380.0 + 2 * 15.0)
+    assert height > 0 and depth > 0
+    # Nothing was written: this is a pure prediction.
+    assert not any(tmp_path.glob("*.msh"))
+
+
+def test_estimate_matches_the_generate_result(tmp_path):
+    from generators import slot_cd_horn
+
+    params = {"mouth_width": 380, "mouth_height": 230, "mouth_roundover": 30, "roundover_sweep_deg": 120}
+    estimated = blabctl.cmd_estimate(_estimate_args(tmp_path, "slot_cd_horn", params))
+    assert estimated["estimated_bbox_mm"] == slot_cd_horn.estimate_bbox_mm(params)
+    assert estimated["estimated_triangles"] == slot_cd_horn.estimate_triangles(params)
+
+
+def test_estimate_rejects_unknown_params(tmp_path):
+    with pytest.raises(ValueError, match="Unknown params"):
+        blabctl.cmd_estimate(_estimate_args(tmp_path, "slot_cd_horn", {"not_a_real_param": 1}))
+
+
+def test_estimate_tolerates_a_generator_without_estimators(monkeypatch, tmp_path):
+    monkeypatch.setattr(generators, "load_generator", lambda _id: FakeGenerator(0, tmp_path))
+    result = blabctl.cmd_estimate(_estimate_args(tmp_path, "fake_horn", None))
+    assert result["estimated_triangles"] is None
+    assert result["estimated_bbox_mm"] is None
