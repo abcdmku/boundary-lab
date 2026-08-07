@@ -14,6 +14,12 @@ import "./controls.css";
 export function Modal({ title, subtitle, onClose, children, footer, size = "md", labelledBy }) {
   const panelRef = useRef(null);
   const restoreRef = useRef(null);
+  // Callers pass `onClose` as an inline closure, and the dashboard re-renders
+  // on every SSE tick. Depending on its identity would tear down and re-run
+  // this effect mid-typing — moving focus back to the first field several
+  // times a minute — so hold it in a ref and set up exactly once per modal.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     restoreRef.current = document.activeElement;
@@ -29,7 +35,7 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
       }
     };
     document.addEventListener("keydown", onKey, true);
@@ -41,7 +47,9 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
       const el = restoreRef.current;
       if (el && typeof el.focus === "function") el.focus();
     };
-  }, [onClose]);
+    // Deliberately empty: this is modal-lifetime setup, not per-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div

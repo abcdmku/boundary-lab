@@ -95,11 +95,6 @@ export function parseParamPairs(text, schema) {
   return { params: out, error: null };
 }
 
-export const formatParamPairs = (params) =>
-  Object.entries(params || {})
-    .map(([k, v]) => `${k}=${fmtVal(v)}`)
-    .join(", ");
-
 /** Coerce one sweep value to the type its field expects. */
 export function coerceSweepValue(field, raw, schema) {
   const text = raw.trim();

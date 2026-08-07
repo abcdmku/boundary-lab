@@ -9,7 +9,6 @@ import { StatusDot } from "./StatusDot.jsx";
 import {
   MAX_BATCH_JOBS,
   coerceSweepValue,
-  formatParamPairs,
   paramsSummary,
   parseParamPairs,
   previewJobs,
@@ -20,7 +19,19 @@ import { fmtInt } from "../../lib/format";
 import "./batch.css";
 
 let variantSeq = 0;
-const newVariant = (init = {}) => ({ key: ++variantSeq, name: "", settings: {}, params: {}, targetId: "", ...init });
+const newVariant = (init = {}) => ({
+  key: ++variantSeq,
+  name: "",
+  settings: {},
+  params: {},
+  // Raw text of the mesh param editor lives on the variant, not inside the
+  // row: a parse error has to reach the dialog's blockers, or the buttons stay
+  // enabled while `params` silently holds the last text that DID parse.
+  paramsText: "",
+  paramsError: null,
+  targetId: "",
+  ...init,
+});
 
 const SOLVE_SWEEP_FIELDS = [
   ["fmin", "fmin (Hz)"],
@@ -95,11 +106,17 @@ export function BatchDialog({
   // ---- validation -----------------------------------------------------
   const baseErrors =
     kind === "solve" ? validateSolveSettings(baseSettings) : validateParams(schema, baseParams);
+  // A variant is validated as the job it will BECOME — base merged with the
+  // override — so a variant that pushes a schema-bounded param out of range is
+  // caught here rather than by a mesh job that fails an hour later.
   const variantErrors = variants.map((v) =>
-    kind === "solve" ? validateSolveSettings({ ...baseSettings, ...v.settings }) : {},
+    kind === "solve"
+      ? validateSolveSettings({ ...baseSettings, ...v.settings })
+      : validateParams(schema, { ...baseParams, ...v.params }),
   );
   const hasFieldErrors =
     Object.keys(baseErrors).length > 0 || variantErrors.some((e) => Object.keys(e).length > 0);
+  const unparsedVariants = variants.filter((v) => v.paramsError);
 
   const targetById = (id) => (targets || []).find((t) => t.id === id);
   const usedTargetIds = [...new Set(rows.map((r) => r.targetId || "local"))];
@@ -120,6 +137,10 @@ export function BatchDialog({
       `${fmtInt(total)} jobs is over the ${MAX_BATCH_JOBS}-job cap — the bridge will refuse the whole sweep.`,
     );
   if (hasFieldErrors) blockers.push("Fix the highlighted settings.");
+  if (unparsedVariants.length)
+    blockers.push(
+      `Variant ${variants.indexOf(unparsedVariants[0]) + 1}: ${unparsedVariants[0].paramsError}`,
+    );
   for (const t of badTargets)
     blockers.push(
       `${t.label} cannot take work: ${t.unavailableReason || t.status || "unavailable"}`,
@@ -163,7 +184,13 @@ export function BatchDialog({
             ? newVariant({ targetId: String(value) })
             : newVariant({ settings: { [activeSweepField]: value } }),
         );
-      else made.push(newVariant({ params: { [activeSweepField]: value } }));
+      else
+        made.push(
+          newVariant({
+            params: { [activeSweepField]: value },
+            paramsText: `${activeSweepField}=${value}`,
+          }),
+        );
     }
     setSweepError(null);
     setSweepValues("");
@@ -175,7 +202,8 @@ export function BatchDialog({
         !prev[0].name &&
         !prev[0].targetId &&
         Object.keys(prev[0].settings).length === 0 &&
-        Object.keys(prev[0].params).length === 0;
+        Object.keys(prev[0].params).length === 0 &&
+        !prev[0].paramsText;
       return pristine ? made : [...prev, ...made];
     });
   };
@@ -578,6 +606,8 @@ export function BatchDialog({
                               name: v.name,
                               settings: { ...v.settings },
                               params: { ...v.params },
+                              paramsText: v.paramsText,
+                              paramsError: v.paramsError,
                               targetId: v.targetId,
                             });
                             const at = prev.findIndex((x) => x.key === v.key);
@@ -647,8 +677,6 @@ export function BatchDialog({
 }
 
 function VariantRow({ index, variant, kind, schema, targets, errors, onPatch, onDuplicate, onDrop }) {
-  const [pairsText, setPairsText] = useState(() => formatParamPairs(variant.params));
-  const [pairsError, setPairsError] = useState(null);
   const setSetting = (key) => (value) =>
     onPatch({
       settings: (() => {
@@ -746,18 +774,26 @@ function VariantRow({ index, variant, kind, schema, targets, errors, onPatch, on
       ) : (
         <td>
           <TextInput
-            value={pairsText}
-            invalid={!!pairsError}
+            value={variant.paramsText}
+            invalid={!!variant.paramsError || Object.keys(errors || {}).length > 0}
             onChange={(e) => {
-              setPairsText(e.target.value);
-              const { params, error } = parseParamPairs(e.target.value, schema);
-              setPairsError(error);
-              if (!error) onPatch({ params });
+              const text = e.target.value;
+              const { params, error } = parseParamPairs(text, schema);
+              // Keep the text and the error together with the params they came
+              // from: on a parse error `params` is left alone, and the stored
+              // error is what stops the batch from being created.
+              onPatch(error ? { paramsText: text, paramsError: error } : { paramsText: text, paramsError: null, params });
             }}
             placeholder="length=120, mouth_width=260"
             aria-label={`variant ${index + 1} params`}
           />
-          {pairsError && <div className="field-error">{pairsError}</div>}
+          {variant.paramsError ? (
+            <div className="field-error">{variant.paramsError}</div>
+          ) : (
+            Object.entries(errors || {}).map(([k, msg]) => (
+              <div key={k} className="field-error">{`${k}: ${msg}`}</div>
+            ))
+          )}
         </td>
       )}
       <td className="variant-drop">

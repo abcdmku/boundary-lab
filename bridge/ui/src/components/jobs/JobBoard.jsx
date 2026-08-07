@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Layers, Plus } from "lucide-react";
 import { JobRow } from "./JobRow.jsx";
 import { BatchGroup } from "./BatchGroup.jsx";
@@ -54,6 +54,9 @@ export function JobBoard({
   const [query, setQuery] = useState("");
   const [grouped, setGrouped] = useState(true);
   const [bulkBusy, setBulkBusy] = useState(null);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const armTimer = useRef(null);
+  useEffect(() => () => clearTimeout(armTimer.current), []);
 
   const toggle = (id) =>
     setOpenIds((prev) => {
@@ -93,19 +96,23 @@ export function JobBoard({
   const visibleIds = useMemo(() => new Set(visible.map((j) => j.id)), [visible]);
   const draftCount = (jobs || []).filter((j) => j.status === "draft").length;
 
-  const selectOne = (id, on) =>
+  const selectOne = (id, on) => {
+    setDeleteArmed(false);
     setSelected((prev) => {
       const next = new Set(prev);
       if (on) next.add(id);
       else next.delete(id);
       return next;
     });
-  const selectMany = (ids) =>
+  };
+  const selectMany = (ids) => {
+    setDeleteArmed(false);
     setSelected((prev) => {
       const next = new Set(prev);
       for (const id of ids) if (visibleIds.has(id)) next.add(id);
       return next;
     });
+  };
 
   const selectedJobs = (jobs || []).filter((j) => selected.has(j.id));
   const selDrafts = selectedJobs.filter((j) => j.status === "draft");
@@ -152,6 +159,21 @@ export function JobBoard({
       }
       setSelected(new Set());
     });
+
+  // Deleting many finished jobs at once is the most destructive thing on this
+  // board and the least recoverable, so it arms exactly like the row and batch
+  // delete buttons rather than firing on the first click.
+  const armDelete = () => {
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      clearTimeout(armTimer.current);
+      armTimer.current = setTimeout(() => setDeleteArmed(false), 3000);
+      return;
+    }
+    clearTimeout(armTimer.current);
+    setDeleteArmed(false);
+    void deleteSelected();
+  };
 
   // ---- grouping ----
   const batchList = useMemo(() => {
@@ -302,16 +324,19 @@ export function JobBoard({
           </button>
           <button
             type="button"
-            className="btn btn--sm btn--danger"
+            className={cn("btn btn--sm", deleteArmed ? "btn--danger-solid" : "btn--danger")}
             disabled={!selDeletable.length || bulkBusy !== null}
-            onClick={deleteSelected}
+            onClick={armDelete}
           >
-            Delete {selDeletable.length || ""}
+            {deleteArmed ? `Confirm delete ${selDeletable.length}` : `Delete ${selDeletable.length || ""}`}
           </button>
           <button
             type="button"
             className="btn btn--ghost btn--sm"
-            onClick={() => setSelected(new Set())}
+            onClick={() => {
+              setDeleteArmed(false);
+              setSelected(new Set());
+            }}
           >
             Clear
           </button>
