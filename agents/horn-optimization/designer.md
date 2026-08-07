@@ -58,9 +58,14 @@ For `slot_cd_horn` (`back: "shell"`), with `c = 1 - cos(roundover_sweep_deg)`:
 margin  = max(mouth_roundover * c,  wall_thickness + (mouth_roundover - wall_thickness) * c)   # per side
 width   = mouth_width  + 2 * margin
 height  = mouth_height + 2 * margin
-depth   = z_e + flare_depth + mouth_roundover * max(sin(phi) for phi <= roundover_sweep_deg)
+depth   = z_e + flare_depth + mouth_roundover * sin(min(roundover_sweep_deg, 90))   # see note
 z_e     = (slot_length / 2 - throat_diameter / 2) / tan(wall_angle_deg)      # derived adapter depth
 ```
+
+Width and height are exact. The depth term is exact for a sweep up to 90 deg; past 90 deg
+the rolled lip is a *sampled* arc (`roundover_segments + 1` stations from 0 to the sweep),
+so it only reaches the full `mouth_roundover` when 90 deg is one of the stations — use
+`blabctl estimate` if depth is the binding axis. Width is almost always the binding one.
 
 Sanity checks on that margin: it is exactly `mouth_roundover` at the default 90 deg
 sweep, `2 * mouth_roundover` at a 180 deg rollback, and just `wall_thickness` when

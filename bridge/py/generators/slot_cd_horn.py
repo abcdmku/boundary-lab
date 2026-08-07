@@ -64,7 +64,7 @@ SCHEMA = {
         "OUTER BOUNDING BOX (mouth_width/mouth_height are the air aperture, the shell is larger): "
         "margin = max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) per side, "
         "c = 1 - cos(roundover_sweep_deg); bbox = [mouth_width + 2*margin, mouth_height + 2*margin, "
-        "z_e + flare_depth + mouth_roundover*max(sin(phi) for phi <= roundover_sweep_deg)]. "
+        "z_e + flare_depth + mouth_roundover*max(sin(phi)) over the sampled roundover stations]. "
         "`blabctl estimate --generator slot_cd_horn --params p.json` returns it exactly without meshing."
     ),
     "params": {
@@ -176,9 +176,11 @@ SCHEMA = {
                 "minimum": 10,
                 "maximum": 500,
                 "description": (
-                    "Axial depth of the CD flare in mm. Outer depth = z_e + flare_depth + "
-                    "mouth_roundover*max(sin(phi) for phi <= roundover_sweep_deg), with the derived adapter "
-                    "depth z_e = (slot_length/2 - throat_diameter/2)/tan(wall_angle_deg)."
+                    "Axial depth of the CD flare in mm. Outer depth = z_e + flare_depth + lip_depth, where "
+                    "lip_depth = mouth_roundover * max(sin(phi)) over the roundover_segments+1 arc stations "
+                    "evenly spaced from 0 to roundover_sweep_deg (so mouth_roundover*sin(sweep) for a sweep "
+                    "up to 90 deg), and the derived adapter depth z_e = (slot_length/2 - "
+                    "throat_diameter/2)/tan(wall_angle_deg)."
                 ),
             },
             "mouth_superellipse_n": {
@@ -626,6 +628,11 @@ def mouth_to_outer_margin_mm(params: dict) -> float:
     which is ``mouth_roundover`` exactly at the default 90 deg sweep, grows to
     ``2 * mouth_roundover`` at a 180 deg rollback, and collapses to
     ``wall_thickness`` when ``mouth_roundover`` is 0.
+
+    Unlike the lip *depth* (see :func:`mouth_lip_depth_mm`), the sampling of the
+    arc does not matter here: ``1 - cos`` increases monotonically over the whole
+    legal sweep range, so the outermost station is always the last one, which the
+    loft samples exactly.
     """
     p = _with_defaults(params)
     if str(p["back"]) != "shell":
@@ -638,6 +645,27 @@ def mouth_to_outer_margin_mm(params: dict) -> float:
     return max(roundover * c, thickness + (roundover - thickness) * c)
 
 
+def _roundover_station_angles(params: dict) -> np.ndarray:
+    """The roundover arc angles the loft actually samples (see _quadrant_chains)."""
+    return np.linspace(0.0, math.radians(float(params["roundover_sweep_deg"])), int(params["roundover_segments"]) + 1)
+
+
+def mouth_lip_depth_mm(params: dict) -> float:
+    """How far past the mouth plane the rolled lip reaches, in mm (back='shell').
+
+    The lip is a *sampled* arc, not a continuous one: ``_quadrant_chains`` places
+    ``roundover_segments + 1`` stations evenly from 0 to ``roundover_sweep_deg``,
+    and the deepest station is whichever lies nearest 90 deg. So a sweep past
+    90 deg only reaches the full ``mouth_roundover`` when 90 deg happens to be
+    sampled — e.g. sweep 120 over 4 segments samples 0/30/60/90/120 and does,
+    but sweep 100 over 4 segments samples 0/25/50/75/100 and stops 1.5% short
+    (worst case in the legal range, sweep 110 over 3 segments, is 4.2% short).
+    Assuming the continuous maximum would overstate the depth by up to ~1.3 mm
+    and could reject a valid near-limit proposal.
+    """
+    return float(params["mouth_roundover"]) * float(np.max(np.sin(_roundover_station_angles(params))))
+
+
 def estimate_bbox_mm(params: dict) -> list[float]:
     """Closed-form outer bounding box [x, y, z] in mm, without building the mesh.
 
@@ -648,7 +676,7 @@ def estimate_bbox_mm(params: dict) -> list[float]:
 
         x = mouth_width  + 2 * margin        (see mouth_to_outer_margin_mm)
         y = mouth_height + 2 * margin
-        z = z_e + flare_depth + mouth_roundover * max(sin(phi) for phi <= sweep)
+        z = z_e + flare_depth + lip_depth    (see mouth_lip_depth_mm)
 
     with the derived adapter depth z_e = (slot_length/2 - throat_diameter/2) /
     tan(wall_angle_deg). For back='enclosure' the margin is ``enclosure_margin``,
@@ -661,9 +689,7 @@ def estimate_bbox_mm(params: dict) -> list[float]:
     height = float(p["mouth_height"]) + 2.0 * margin
     if str(p["back"]) != "shell":
         return [width, height, float(d["depth_eff"])]
-    sweep = math.radians(float(p["roundover_sweep_deg"]))
-    lip_z = float(p["mouth_roundover"]) * (math.sin(sweep) if sweep <= math.pi / 2.0 else 1.0)
-    return [width, height, d["z_m"] + lip_z]
+    return [width, height, d["z_m"] + mouth_lip_depth_mm(p)]
 
 
 def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None]) -> dict:
