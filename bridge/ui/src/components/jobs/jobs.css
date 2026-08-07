@@ -9,8 +9,119 @@
 .job-board {
   flex: 1 1 0%;
   min-width: 0;
-  max-width: 860px;
+  max-width: 940px;
   padding: 16px 24px 48px;
+}
+
+/* ---- board header: title, counts, the two creation entry points ---- */
+.board-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.board-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.board-count {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.board-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+/* ---- filters ---- */
+.board-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.filter-set {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--muted);
+}
+.filter-chip {
+  display: inline-flex;
+  height: 22px;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+.filter-chip:hover {
+  color: var(--foreground);
+}
+.filter-chip--on {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 18%);
+}
+.filter-chip:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.board-filters > .filter-chip {
+  border-color: var(--border);
+  border-radius: 9px;
+  height: 26px;
+}
+.board-search {
+  width: auto !important;
+  min-width: 140px;
+  flex: 1 1 140px;
+  height: 26px !important;
+}
+
+/* ---- bulk selection bar ---- */
+.selection-bar {
+  position: sticky;
+  top: 48px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+  font-size: 12.5px;
+}
+
+/* ---- per-row selection checkbox ---- */
+.job-select-slot {
+  display: flex;
+  height: 20px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.job-select-slot input {
+  accent-color: var(--primary);
+  cursor: pointer;
 }
 
 /* ---- row card ---- */
