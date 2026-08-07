@@ -100,7 +100,16 @@ export const STATE_VERSION = 2;
 interface PersistedState {
   version: number;
   jobs: Job[];
+  /**
+   * Feature-owned top-level sections (see readSection/writeSection). Keeps
+   * state.json a single file with a single atomic writer while letting modules
+   * like vast/ own their own slice without this file knowing the shape.
+   */
+  [section: string]: unknown;
 }
+
+/** Keys this file owns; everything else in state.json is a feature section. */
+const RESERVED_KEYS = new Set(["version", "jobs", "runs"]);
 
 const stateFile = () => path.join(config.dataDir, "state.json");
 
@@ -224,8 +233,17 @@ let state: PersistedState = { version: STATE_VERSION, jobs: [] };
 export function migrateState(raw: unknown): { state: PersistedState; migratedFrom: number | null } {
   const obj = (raw !== null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const version = typeof obj.version === "number" ? obj.version : 1;
+  // Feature sections (vast/, …) are owned by other modules and pass through
+  // untouched. Dropping them here would silently destroy, say, the record of
+  // which cloud instances are rented and billing by the second.
+  const sections = Object.fromEntries(
+    Object.entries(obj).filter(([key]) => !RESERVED_KEYS.has(key)),
+  );
   if (version >= STATE_VERSION && Array.isArray(obj.jobs)) {
-    return { state: { version: STATE_VERSION, jobs: obj.jobs as Job[] }, migratedFrom: null };
+    return {
+      state: { ...sections, version: STATE_VERSION, jobs: obj.jobs as Job[] },
+      migratedFrom: null,
+    };
   }
   // v1: { runs: Run[] }
   const legacy = (Array.isArray(obj.runs) ? obj.runs : Array.isArray(obj.jobs) ? obj.jobs : []) as
@@ -253,7 +271,7 @@ export function migrateState(raw: unknown): { state: PersistedState; migratedFro
     if (job.target === undefined) job.target = { type: "local" };
     return job;
   });
-  return { state: { version: STATE_VERSION, jobs }, migratedFrom: version };
+  return { state: { ...sections, version: STATE_VERSION, jobs }, migratedFrom: version };
 }
 
 export function loadStore() {
@@ -434,6 +452,39 @@ export const getJob = (id: string) => state.jobs.find((j) => j.id === id);
 /** Newest first. */
 export const listJobs = () =>
   [...state.jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+// ---------- feature sections ----------
+/**
+ * Read a feature-owned section of state.json (e.g. "vast"). Returns the
+ * fallback when the key is absent or holds something other than an object —
+ * a hand-edited or older state file must never crash a feature module.
+ * The caller owns the shape; this file only guarantees persistence.
+ */
+export function readSection<T>(key: string, fallback: T): T {
+  const value = state[key];
+  if (value === null || typeof value !== "object") return fallback;
+  return value as T;
+}
+
+/**
+ * Replace a feature-owned section and persist. Emits a change with no jobId,
+ * which the SSE stream turns into a full-state push — so UI clients see
+ * section updates on the same live channel as jobs.
+ *
+ * Persists synchronously rather than on the debounce: sections track things
+ * like rented cloud instances that cost money by the second, and a crash in
+ * the debounce window must never lose the record of one.
+ */
+export function writeSection(key: string, value: unknown) {
+  if (RESERVED_KEYS.has(key)) throw new Error(`"${key}" is not a feature section`);
+  state[key] = value;
+  try {
+    persistNow();
+  } catch (err) {
+    console.error(`[bridge] failed to persist section "${key}": ${err}`);
+  }
+  changed();
+}
 
 /** All jobs in a batch, oldest first (creation order within the sweep). */
 export const listBatch = (batchId: string) =>

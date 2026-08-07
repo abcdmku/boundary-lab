@@ -206,6 +206,25 @@ describe("v1 -> v2 migration", () => {
     assert.ok(!toml.includes(path.join(dataDir, "runs")));
   });
 
+  test("feature sections survive the migration untouched", () => {
+    // The vast.ai registry lives in its own top-level section and records
+    // instances that bill by the second — a schema upgrade must not eat it.
+    const seeded = { instances: [{ id: 42, label: "rtx4090", status: "ready" }] };
+    const migrated = store.migrateState({ runs: [], vast: seeded, somethingElse: 7 });
+    assert.deepEqual(migrated.state.vast, seeded);
+    assert.equal(migrated.state.somethingElse, 7);
+    assert.equal(migrated.state.version, 2);
+  });
+
+  test("readSection / writeSection round-trip and persist immediately", () => {
+    assert.deepEqual(store.readSection("vast", { instances: [] }), { instances: [] });
+    store.writeSection("vast", { instances: [{ id: 7 }] });
+    assert.deepEqual(store.readSection("vast", { instances: [] }), { instances: [{ id: 7 }] });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, "state.json"), "utf8"));
+    assert.deepEqual(onDisk.vast, { instances: [{ id: 7 }] }, "written without waiting for the debounce");
+    assert.throws(() => store.writeSection("jobs", []), /not a feature section/);
+  });
+
   test("migrating twice is a no-op", () => {
     const again = store.migrateState(
       JSON.parse(fs.readFileSync(path.join(dataDir, "state.json"), "utf8")),
