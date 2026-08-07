@@ -12,7 +12,8 @@
     "prestart": "cd ui && npm run build",
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/store.test.ts tests/actions.test.ts tests/queue.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",

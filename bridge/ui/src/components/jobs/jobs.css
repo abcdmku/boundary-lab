@@ -1,12 +1,12 @@
-/* Run board styles as plain CSS. The tailwind v4 dev toolchain in this
+/* Job board styles as plain CSS. The tailwind v4 dev toolchain in this
    repo intermittently fails to emit utilities (documented in index.css —
    confirmed here for `gap-3`, `w-full`, `aspect-[4/3]`, arbitrary grid
    templates, text sizes, and more), so everything layout- or
-   theme-critical for the run board lives here, referencing the same
+   theme-critical for the job board lives here, referencing the same
    design tokens. 4px grid throughout. */
 
 /* ---- board column ---- */
-.run-board {
+.job-board {
   flex: 1 1 0%;
   min-width: 0;
   max-width: 860px;
@@ -14,7 +14,7 @@
 }
 
 /* ---- row card ---- */
-.run-card {
+.job-card {
   width: 100%;
   margin-bottom: 8px;
   overflow: hidden;
@@ -22,75 +22,75 @@
   border-radius: 12px;
   background: var(--card);
 }
-.run-head {
+.job-head {
   display: flex;
   align-items: flex-start;
   gap: 12px;
   padding: 8px 12px;
   cursor: pointer;
 }
-.run-head:hover {
+.job-head:hover {
   background: var(--accent);
 }
 
 /* status dot: fixed-height slot pins it to the first line, centered
-   against the run name even when the row wraps to two lines */
-.run-dot-slot {
+   against the job name even when the row wraps to two lines */
+.job-dot-slot {
   display: flex;
   height: 20px;
   flex-shrink: 0;
   align-items: center;
 }
-.run-dot {
+.job-dot {
   width: 8px;
   height: 8px;
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--muted-foreground);
 }
-.run-dot--running {
+.job-dot--running {
   background: var(--primary);
 }
-.run-dot--done {
+.job-dot--done {
   background: var(--success);
 }
-.run-dot--failed {
+.job-dot--failed {
   background: var(--destructive);
 }
-.run-dot--pulse {
-  animation: run-dot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+.job-dot--pulse {
+  animation: job-dot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
-@keyframes run-dot-pulse {
+@keyframes job-dot-pulse {
   50% {
     opacity: 0.4;
   }
 }
 
-.run-main {
+.job-main {
   flex: 1 1 0%;
   min-width: 0;
 }
-.run-title-row {
+.job-title-row {
   display: flex;
   min-width: 0;
   align-items: baseline;
   gap: 8px;
 }
-.run-name {
+.job-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
 }
-.run-time {
+.job-time {
   margin-left: auto;
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
-.run-meta {
+.job-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -101,12 +101,12 @@
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
-.run-meta--error {
+.job-meta--error {
   display: block;
 }
 
 /* ---- link chips: mesh ↔ solve navigation on the meta line ---- */
-.run-chip {
+.job-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -124,39 +124,39 @@
     background-color 0.15s,
     color 0.15s;
 }
-.run-chip:hover {
+.job-chip:hover {
   background: var(--accent);
   color: var(--foreground);
 }
-.run-chip:focus-visible {
+.job-chip:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
-.run-chip .run-dot {
+.job-chip .job-dot {
   width: 6px;
   height: 6px;
 }
-.run-meta--error {
+.job-meta--error {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--destructive-foreground);
 }
-.run-progress {
+.job-progress {
   margin-top: 6px;
   height: 2px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--border);
 }
-.run-progress-fill {
+.job-progress-fill {
   height: 100%;
   background: var(--primary);
   transition: width 0.4s;
 }
 
 /* ---- row actions: invisible until row hover / keyboard focus ---- */
-.run-actions {
+.job-actions {
   display: flex;
   flex-shrink: 0;
   align-self: center;
@@ -164,12 +164,12 @@
   opacity: 0;
   transition: opacity 0.15s;
 }
-.run-head:hover .run-actions,
-.run-actions:focus-within,
-.run-actions--armed {
+.job-head:hover .job-actions,
+.job-actions:focus-within,
+.job-actions--armed {
   opacity: 1;
 }
-.run-action-btn {
+.job-action-btn {
   display: inline-flex;
   align-items: center;
   height: 24px;
@@ -187,33 +187,33 @@
     background-color 0.15s,
     color 0.15s;
 }
-.run-action-btn:hover {
+.job-action-btn:hover {
   background: var(--accent);
   color: var(--foreground);
 }
-.run-action-btn:focus-visible {
+.job-action-btn:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
-.run-action-btn--danger {
+.job-action-btn--danger {
   color: var(--destructive-foreground);
 }
-.run-action-btn--danger:hover {
+.job-action-btn--danger:hover {
   background: color-mix(in srgb, var(--destructive) 10%, transparent);
   color: var(--destructive-foreground);
 }
 
 /* ---- detail: quiet tabs ---- */
-.run-detail {
+.job-detail {
   border-top: 1px solid var(--border);
 }
-.run-tabs {
+.job-tabs {
   display: flex;
   gap: 20px;
   padding: 8px 12px 0;
   border-bottom: 1px solid var(--border);
 }
-.run-tab {
+.job-tab {
   margin-bottom: -1px;
   padding: 0 0 8px;
   border: 0;
@@ -226,17 +226,17 @@
   cursor: pointer;
   transition: color 0.15s;
 }
-.run-tab:hover {
+.job-tab:hover {
   color: var(--foreground);
 }
-.run-tab--active {
+.job-tab--active {
   border-bottom-color: var(--primary);
   color: var(--foreground);
 }
-.run-tab-panel {
+.job-tab-panel {
   padding: 12px;
 }
-.run-tab-empty {
+.job-tab-empty {
   padding: 24px 0;
   font-size: 13px;
   color: var(--muted-foreground);
@@ -295,37 +295,37 @@
 }
 
 /* ---- footer: at most three quiet links + inline error ---- */
-.run-footer {
+.job-footer {
   border-top: 1px solid var(--border);
   padding: 8px 12px;
   font-size: 12px;
   color: var(--muted-foreground);
 }
-.run-footer a {
+.job-footer a {
   color: inherit;
   text-decoration: none;
 }
-.run-footer a:hover {
+.job-footer a:hover {
   color: var(--foreground);
   text-decoration: underline;
 }
-.run-footer-scores {
+.job-footer-scores {
   margin-bottom: 6px;
   font-variant-numeric: tabular-nums;
 }
-.run-footer-scores:last-child {
+.job-footer-scores:last-child {
   margin-bottom: 0;
 }
-.run-footer-sep {
+.job-footer-sep {
   margin: 0 8px;
   color: var(--border);
 }
-.run-footer-error {
+.job-footer-error {
   margin-top: 6px;
   white-space: pre-wrap;
   color: var(--destructive-foreground);
 }
-.run-footer-error:first-child {
+.job-footer-error:first-child {
   margin-top: 0;
 }
 

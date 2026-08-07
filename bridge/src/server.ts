@@ -7,6 +7,31 @@
  * The UI never talks to t3 directly — it calls this backend, which holds the
  * bearer token. The HTTP API and the MCP tools call the same functions in
  * actions.ts: one code path.
+ *
+ * HTTP surface (see bridge/README.md for the full contract):
+ *   GET    /api/state
+ *   POST   /api/generators/refresh
+ *   GET    /api/targets
+ *   POST   /api/generate                  launch a mesh job now
+ *   POST   /api/solve                     launch a solve job now
+ *   GET    /api/jobs                      list (filterable)
+ *   POST   /api/jobs                      create ONE draft
+ *   POST   /api/jobs/batch                create a sweep (optionally launched)
+ *   POST   /api/jobs/launch               launch drafts by ids and/or batchId
+ *   POST   /api/jobs/cancel               cancel by ids and/or batchId
+ *   GET    /api/jobs/:id
+ *   PATCH  /api/jobs/:id                  edit a draft
+ *   DELETE /api/jobs/:id
+ *   POST   /api/jobs/:id/launch
+ *   POST   /api/jobs/:id/cancel
+ *   POST   /api/jobs/:id/rescan
+ *   GET    /api/batches
+ *   GET    /api/batches/:batchId
+ *   POST   /api/batches/:batchId/launch
+ *   POST   /api/batches/:batchId/cancel
+ *   DELETE /api/batches/:batchId
+ *   GET    /api/events                    SSE
+ *   GET    /artifacts/:jobId/*            files from a job's directory
  */
 import express from "express";
 import fs from "node:fs";
@@ -16,6 +41,7 @@ import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
 import * as actions from "./actions.ts";
+import { listTargets } from "./targets.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
 
@@ -44,6 +70,30 @@ const fail = (res: express.Response, err: unknown) => {
   res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
 };
 
+/** Run a handler, turning ActionError into its HTTP status. */
+const guard = (res: express.Response, fn: () => unknown) => {
+  try {
+    const value = fn();
+    res.json(value === undefined ? { ok: true } : value);
+  } catch (err) {
+    fail(res, err);
+  }
+};
+
+const asObject = (value: unknown, label: string): Record<string, unknown> | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value))
+    throw new actions.ActionError(`${label} must be an object`);
+  return value as Record<string, unknown>;
+};
+
+const asStringArray = (value: unknown, label: string): string[] | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+    throw new actions.ActionError(`${label} must be an array of strings`);
+  return value as string[];
+};
+
 // ---------- agent face: MCP over streamable HTTP (stateless) ----------
 app.post("/mcp", async (req, res) => {
   const server = buildMcpServer();
@@ -68,101 +118,216 @@ app.post("/api/generators/refresh", async (_req, res) => {
   res.json(await refreshGenerators());
 });
 
+/** Execution targets available right now: always local, plus registered remotes. */
+app.get("/api/targets", (_req, res) => {
+  res.json({ targets: listTargets() });
+});
+
 app.post("/api/generate", (req, res) => {
-  const { generator, name, params } = req.body ?? {};
-  if (typeof generator !== "string") return fail(res, new actions.ActionError("generator (string) is required"));
-  if (params !== undefined && (typeof params !== "object" || params === null || Array.isArray(params)))
-    return fail(res, new actions.ActionError("params must be an object"));
-  try {
-    res.json(actions.startGenerate({ generator, name, params }));
-  } catch (err) {
-    fail(res, err);
-  }
+  const { generator, name, params, batchId } = req.body ?? {};
+  if (typeof generator !== "string")
+    return fail(res, new actions.ActionError("generator (string) is required"));
+  guard(res, () =>
+    actions.startGenerate({
+      generator,
+      name,
+      params: asObject(params, "params"),
+      ...(typeof batchId === "string" ? { batchId } : {}),
+    }),
+  );
 });
 
 app.post("/api/solve", (req, res) => {
-  const { meshRunId, name, fmin, fmax, count, backend, symmetry } = req.body ?? {};
-  if (typeof meshRunId !== "string") return fail(res, new actions.ActionError("meshRunId (string) is required"));
-  const num = (v: unknown, label: string): number | undefined => {
-    if (v === undefined || v === null) return undefined;
-    const n = Number(v);
-    if (!Number.isFinite(n)) throw new actions.ActionError(`${label} must be a number`);
-    return n;
-  };
-  try {
-    res.json(
-      actions.startSolve({
-        meshRunId,
-        name,
-        options: {
-          fmin: num(fmin, "fmin"),
-          fmax: num(fmax, "fmax"),
-          count: num(count, "count"),
-          backend: typeof backend === "string" ? backend : undefined,
-          symmetry: typeof symmetry === "string" ? symmetry : undefined,
-        },
-      }),
-    );
-  } catch (err) {
-    fail(res, err);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const meshJobId = body.meshJobId;
+  if (typeof meshJobId !== "string")
+    return fail(res, new actions.ActionError("meshJobId (string) is required"));
+  guard(res, () =>
+    actions.startSolve({
+      meshJobId,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      options: actions.readSolveOptions(body),
+      target: body.target,
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+    }),
+  );
+});
+
+// ----- jobs -----
+app.get("/api/jobs", (req, res) => {
+  const { kind, status, batchId, parentJobId, limit } = req.query as Record<string, string>;
+  let jobs = store.listJobs();
+  if (kind) jobs = jobs.filter((j) => j.kind === kind);
+  if (status) {
+    const wanted = new Set(status.split(","));
+    jobs = jobs.filter((j) => wanted.has(j.status));
   }
+  if (batchId) jobs = jobs.filter((j) => j.batchId === batchId);
+  if (parentJobId) jobs = jobs.filter((j) => j.parentJobId === parentJobId);
+  const n = Number(limit);
+  if (Number.isFinite(n) && n > 0) jobs = jobs.slice(0, n);
+  res.json({ jobs });
 });
 
-app.post("/api/runs/:id/cancel", (req, res) => {
-  try {
-    res.json(actions.cancelRun(req.params.id));
-  } catch (err) {
-    fail(res, err);
-  }
+/** Create ONE configured-but-unlaunched job. */
+app.post("/api/jobs", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.createDraft({
+      kind: body.kind as store.JobKind,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.generator === "string" ? { generator: body.generator } : {}),
+      params: asObject(body.params, "params"),
+      ...(typeof body.meshJobId === "string" ? { meshJobId: body.meshJobId } : {}),
+      options: actions.readSolveOptions(body),
+      target: body.target,
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+      ...(typeof body.batchName === "string" ? { batchName: body.batchName } : {}),
+    }),
+  );
 });
 
-app.delete("/api/runs/:id", (req, res) => {
-  try {
-    actions.deleteRun(req.params.id);
-    res.json({ ok: true });
-  } catch (err) {
-    fail(res, err);
-  }
+/** Create a sweep: meshJobIds × variants (see actions.createBatch). */
+app.post("/api/jobs/batch", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () => {
+    const variants = body.variants;
+    if (variants !== undefined && !Array.isArray(variants))
+      throw new actions.ActionError("variants must be an array of objects");
+    return actions.createBatch({
+      kind: body.kind as store.JobKind,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+      launch: body.launch === true,
+      target: body.target,
+      ...(typeof body.meshJobId === "string" ? { meshJobId: body.meshJobId } : {}),
+      ...(asStringArray(body.meshJobIds, "meshJobIds")
+        ? { meshJobIds: asStringArray(body.meshJobIds, "meshJobIds") }
+        : {}),
+      options: actions.readSolveOptions(body),
+      ...(typeof body.generator === "string" ? { generator: body.generator } : {}),
+      params: asObject(body.params, "params"),
+      ...(variants ? { variants: variants as actions.BatchVariant[] } : {}),
+    });
+  });
 });
 
-app.post("/api/runs/:id/rescan", (req, res) => {
-  try {
-    res.json(actions.rescanRun(req.params.id));
-  } catch (err) {
-    fail(res, err);
-  }
+/** Launch drafts by explicit ids and/or a whole batch. */
+app.post("/api/jobs/launch", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.launchJobs({
+      ...(asStringArray(body.jobIds, "jobIds") ? { jobIds: asStringArray(body.jobIds, "jobIds") } : {}),
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+    }),
+  );
 });
 
-app.get("/api/runs/:id", (req, res) => {
-  const run = store.getRun(req.params.id);
-  if (!run) return res.status(404).json({ error: `unknown run ${req.params.id}` });
-  res.json(run);
+/** Cancel by explicit ids and/or a whole batch. */
+app.post("/api/jobs/cancel", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.cancelJobs({
+      ...(asStringArray(body.jobIds, "jobIds") ? { jobIds: asStringArray(body.jobIds, "jobIds") } : {}),
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+    }),
+  );
 });
 
-// live board: SSE — initial full state, then the changed run on every mutation
+app.post("/api/jobs/:id/launch", (req, res) => {
+  guard(res, () => actions.launchJobs({ jobIds: [req.params.id] }));
+});
+
+app.post("/api/jobs/:id/cancel", (req, res) => {
+  guard(res, () => actions.cancelJob(req.params.id));
+});
+
+app.post("/api/jobs/:id/rescan", (req, res) => {
+  guard(res, () => actions.rescanJob(req.params.id));
+});
+
+app.patch("/api/jobs/:id", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.updateDraft(req.params.id, {
+      ...(body.name !== undefined ? { name: String(body.name) } : {}),
+      ...(typeof body.generator === "string" ? { generator: body.generator } : {}),
+      ...(body.params !== undefined ? { params: asObject(body.params, "params") } : {}),
+      ...(typeof body.meshJobId === "string" ? { meshJobId: body.meshJobId } : {}),
+      ...(body.options !== undefined || actions.SOLVE_OPTION_KEYS.some((k) => body[k] !== undefined)
+        ? { options: actions.readSolveOptions(body) }
+        : {}),
+      ...(body.target !== undefined ? { target: body.target } : {}),
+      ...(body.batchId !== undefined
+        ? { batchId: body.batchId === null ? null : String(body.batchId) }
+        : {}),
+      ...(typeof body.batchName === "string" ? { batchName: body.batchName } : {}),
+    }),
+  );
+});
+
+app.delete("/api/jobs/:id", (req, res) => {
+  guard(res, () => {
+    actions.deleteJob(req.params.id);
+    return { ok: true };
+  });
+});
+
+app.get("/api/jobs/:id", (req, res) => {
+  const job = store.getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: `unknown job ${req.params.id}` });
+  res.json({ ...job, lane: queue.laneOf(job.id), queuePosition: queue.queuePosition(job.id) });
+});
+
+// ----- batches -----
+app.get("/api/batches", (_req, res) => {
+  res.json({ batches: actions.listBatches() });
+});
+
+app.get("/api/batches/:batchId", (req, res) => {
+  const summary = actions.batchSummary(req.params.batchId);
+  if (!summary) return res.status(404).json({ error: `unknown batch ${req.params.batchId}` });
+  res.json({ ...summary, jobs: store.listBatch(req.params.batchId) });
+});
+
+app.post("/api/batches/:batchId/launch", (req, res) => {
+  guard(res, () => actions.launchJobs({ batchId: req.params.batchId }));
+});
+
+app.post("/api/batches/:batchId/cancel", (req, res) => {
+  guard(res, () => actions.cancelJobs({ batchId: req.params.batchId }));
+});
+
+app.delete("/api/batches/:batchId", (req, res) => {
+  guard(res, () => actions.deleteBatch(req.params.batchId));
+});
+
+// live board: SSE — initial full state, then the changed job on every mutation
 app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.flushHeaders();
   res.write(`data: ${JSON.stringify({ type: "state", state: actions.fullState() })}\n\n`);
-  const onChange = ({ runId }: { runId?: string }) => {
-    const run = runId ? store.getRun(runId) : undefined;
+  const onChange = ({ jobId }: { jobId?: string }) => {
+    const job = jobId ? store.getJob(jobId) : undefined;
     res.write(
-      `data: ${JSON.stringify(run ? { type: "run", run } : { type: "state", state: actions.fullState() })}\n\n`,
+      `data: ${JSON.stringify(job ? { type: "job", job } : { type: "state", state: actions.fullState() })}\n\n`,
     );
   };
   store.emitter.on("change", onChange);
   req.on("close", () => store.emitter.off("change", onChange));
 });
 
-// ---------- artifacts: files from a run's directory ----------
-app.get("/artifacts/:runId/*", (req, res) => {
-  const run = store.getRun(req.params.runId);
-  if (!run) return res.status(404).json({ error: "unknown run" });
+// ---------- artifacts: files from a job's directory ----------
+// The /artifacts/<id>/… path shape is frozen: artifact URLs are embedded in
+// persisted job summaries and campaign logs from before the run→job rename.
+app.get("/artifacts/:jobId/*", (req, res) => {
+  const job = store.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "unknown job" });
   // Express already percent-decodes route params — decoding again here would
   // throw on literal % in filenames and misread %2F as a path separator.
   const rel = (req.params as Record<string, string>)["0"] ?? "";
-  const dir = path.resolve(store.runDir(run.id));
+  const dir = path.resolve(store.jobDir(job.id));
   const file = path.resolve(dir, rel);
   if (path.relative(dir, file).startsWith("..")) return res.status(403).json({ error: "forbidden" });
   if (!fs.existsSync(file) || !fs.statSync(file).isFile())
@@ -191,6 +356,7 @@ app.listen(config.port, config.host, () => {
   console.log(`[bridge] ui + api      ${config.publicUrl}/`);
   console.log(`[bridge] mcp endpoint  ${config.publicUrl}/mcp`);
   console.log(`[bridge] blabctl       ${config.python} ${config.blabctl}`);
+  console.log(`[bridge] targets       ${listTargets().map((t) => t.id).join(", ")}`);
   console.log(
     `[bridge] t3 orchestration: ${
       t3Configured()

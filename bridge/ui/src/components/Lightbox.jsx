@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import "./runs/runs.css";
+import "./jobs/jobs.css";
 
 // Full-screen overlay; the image sits in a small white frame so the
 // white-background matplotlib plots read cleanly on the dark theme too.

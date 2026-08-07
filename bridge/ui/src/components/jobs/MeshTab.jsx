@@ -1,9 +1,9 @@
 import { MeshViewer } from "./MeshViewer.jsx";
-import { resolveMeshRun, viewerAssets } from "../../lib/viewerAssets";
+import { resolveMeshJob, viewerAssets } from "../../lib/viewerAssets";
 
-export function MeshTab({ run, runs, onOpenLightbox }) {
-  const meshRun = resolveMeshRun(run, runs);
-  const { wallsUrl, drivenUrl, previewUrl } = viewerAssets(meshRun);
+export function MeshTab({ job, jobs, onOpenLightbox }) {
+  const meshJob = resolveMeshJob(job, jobs);
+  const { wallsUrl, drivenUrl, previewUrl } = viewerAssets(meshJob);
 
   if (wallsUrl) {
     return (
@@ -22,5 +22,5 @@ export function MeshTab({ run, runs, onOpenLightbox }) {
       />
     );
   }
-  return <div className="run-tab-empty">No mesh preview available</div>;
+  return <div className="job-tab-empty">No mesh preview available</div>;
 }

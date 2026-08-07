@@ -1,22 +1,22 @@
-// A solve run has no geometry of its own — its Mesh tab shows the parent
-// mesh run's viewer for context.
-export function resolveMeshRun(run, runs) {
-  if (!run) return null;
-  if (run.kind === "mesh") return run;
-  if (!run.parentRunId) return null;
-  return (runs || []).find((r) => r.id === run.parentRunId) || null;
+// A solve job has no geometry of its own — its Mesh tab shows the parent
+// mesh job's viewer for context.
+export function resolveMeshJob(job, jobs) {
+  if (!job) return null;
+  if (job.kind === "mesh") return job;
+  if (!job.parentJobId) return null;
+  return (jobs || []).find((r) => r.id === job.parentJobId) || null;
 }
 
 // Resolve the two STL artifacts (walls, driven) the python layer emits per
-// mesh run, with graceful fallbacks: summary.viewer_stl, then any loose
-// .stl artifact, then the static preview PNG for older runs.
-export function viewerAssets(meshRun) {
-  if (!meshRun) return { wallsUrl: null, drivenUrl: null, previewUrl: null };
-  const arts = meshRun.artifacts || [];
+// mesh job, with graceful fallbacks: summary.viewer_stl, then any loose
+// .stl artifact, then the static preview PNG for older jobs.
+export function viewerAssets(meshJob) {
+  if (!meshJob) return { wallsUrl: null, drivenUrl: null, previewUrl: null };
+  const arts = meshJob.artifacts || [];
   const bySuffix = (suf) => arts.find((a) => a.name && a.name.toLowerCase().endsWith(suf));
   let walls = bySuffix("_walls.stl");
   let driven = bySuffix("_driven.stl");
-  const vs = meshRun.summary && meshRun.summary.viewer_stl;
+  const vs = meshJob.summary && meshJob.summary.viewer_stl;
   if (!walls && vs && vs.walls) walls = { url: vs.walls };
   if (!driven && vs && vs.driven) driven = { url: vs.driven };
   if (!walls) walls = arts.find((a) => a.name && a.name.toLowerCase().endsWith(".stl"));

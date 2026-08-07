@@ -1,14 +1,14 @@
 import { fmtInt, fmtScore } from "../../lib/format";
-import { resolveMeshRun } from "../../lib/viewerAssets";
+import { resolveMeshJob } from "../../lib/viewerAssets";
 import { StatusDot } from "./StatusDot.jsx";
 
-// A clickable pill linking to a related run (mesh ↔ solve). Stops propagation
+// A clickable pill linking to a related job (mesh ↔ solve). Stops propagation
 // so it never toggles the row it lives on.
-function RunChip({ label, status, onNavigate, targetId }) {
+function JobChip({ label, status, onNavigate, targetId }) {
   return (
     <button
       type="button"
-      className="run-chip"
+      className="job-chip"
       onClick={(e) => {
         e.stopPropagation();
         if (onNavigate) onNavigate(targetId);
@@ -23,18 +23,18 @@ function RunChip({ label, status, onNavigate, targetId }) {
 // One glanceable line: tri count (mesh) or Hz range / live progress (solve),
 // plus small link chips tying meshes and solves together and the solve score.
 // Failures surface their error here instead — still one line, nothing else.
-export function Essentials({ run, runs, onNavigate }) {
-  if (run.status === "failed" && run.error) {
-    return <div className="run-meta run-meta--error">{run.error}</div>;
+export function Essentials({ job, jobs, onNavigate }) {
+  if (job.status === "failed" && job.error) {
+    return <div className="job-meta job-meta--error">{job.error}</div>;
   }
 
-  if (run.kind === "mesh") {
-    const s = run.summary;
-    const solves = (runs || []).filter((r) => r.parentRunId === run.id);
+  if (job.kind === "mesh") {
+    const s = job.summary;
+    const solves = (jobs || []).filter((r) => r.parentJobId === job.id);
     const hasTris = s && s.triangles !== undefined;
     if (!hasTris && !solves.length) return null;
     return (
-      <div className="run-meta">
+      <div className="job-meta">
         {hasTris && <span>{fmtInt(s.triangles)} tris</span>}
         {solves.length > 0 && (
           <>
@@ -42,7 +42,7 @@ export function Essentials({ run, runs, onNavigate }) {
               used by {solves.length} solve{solves.length === 1 ? "" : "s"}
             </span>
             {solves.map((solve) => (
-              <RunChip
+              <JobChip
                 key={solve.id}
                 label={solve.name || solve.id}
                 status={solve.status}
@@ -57,22 +57,22 @@ export function Essentials({ run, runs, onNavigate }) {
   }
 
   // solve
-  if (run.status === "running" && run.progress && run.progress.total !== undefined) {
+  if (job.status === "running" && job.progress && job.progress.total !== undefined) {
     return (
-      <div className="run-meta">
-        {run.progress.done || 0}/{run.progress.total}
+      <div className="job-meta">
+        {job.progress.done || 0}/{job.progress.total}
       </div>
     );
   }
-  const p = run.params || {};
-  const mesh = resolveMeshRun(run, runs);
+  const p = job.params || {};
+  const mesh = resolveMeshJob(job, jobs);
   const tris = mesh && mesh.summary && mesh.summary.triangles;
-  const score = run.summary && run.summary.score;
+  const score = job.summary && job.summary.score;
   const hasRange = p.fmin !== undefined && p.fmax !== undefined;
   const hasScore = typeof score === "number" && Number.isFinite(score);
   if (!hasRange && !mesh && !hasScore) return null;
   return (
-    <div className="run-meta">
+    <div className="job-meta">
       {hasRange && (
         <span>
           {fmtInt(p.fmin)}–{fmtInt(p.fmax)} Hz
@@ -80,7 +80,7 @@ export function Essentials({ run, runs, onNavigate }) {
       )}
       {hasScore && <span>score {fmtScore(score)}</span>}
       {mesh && (
-        <RunChip
+        <JobChip
           label={
             tris !== undefined
               ? `${mesh.name || mesh.id} · ${fmtInt(tris)} tris`
