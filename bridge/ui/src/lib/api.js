@@ -52,7 +52,7 @@ export function useBridgeState(onError) {
       refetchTimer.current = setTimeout(fetchState, 250);
     };
     es.onmessage = scheduleRefetch;
-    for (const name of ["run", "state", "ping"]) es.addEventListener(name, scheduleRefetch);
+    for (const name of ["job", "state", "ping"]) es.addEventListener(name, scheduleRefetch);
     return () => {
       es.close();
       clearTimeout(refetchTimer.current);

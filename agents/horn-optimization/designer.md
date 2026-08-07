@@ -28,7 +28,7 @@ below against it). Read, every time:
    outcome, a previous invocation died after logging — supersede it, note that, and
    continue.
 4. For the best 2–3 successful trials, the detailed per-frequency metrics:
-   `bridge/data/runs/<solve_run_id>/metrics.json` (written into the solve run's
+   `bridge/data/jobs/<solve_job_id>/metrics.json` (written into the solve job's
    directory by the scorer). The per-frequency beamwidth arrays there tell you *where in
    the band* a design deviates — the scalar score alone cannot. If a `metrics.json` is
    missing, work from the `trials.jsonl` key_metrics and say so in your hypothesis.

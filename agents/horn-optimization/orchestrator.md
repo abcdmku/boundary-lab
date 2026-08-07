@@ -17,9 +17,10 @@ and never runs solves itself.
 
 - **You coordinate; you never call `solve` yourself.** All mesh/solve/score work happens
   inside the trial-runner role. You never call `generate` either.
-- **ONE trial in flight at any time.** The GPU runs one solve at a time (the bridge queue
-  enforces this machine-wide). Never start a trial before the previous one has been fully
-  recorded in `trials.jsonl`. The campaign is strictly sequential.
+- **ONE trial in flight at any time.** This machine's GPU runs one solve at a time — the
+  bridge's `local:solve` queue lane enforces that structurally, and remote targets (if the
+  campaign uses one) get one lane per instance. Never start a trial before the previous one
+  has been fully recorded in `trials.jsonl`. The campaign is strictly sequential.
 - **All state lives on disk** under `runs/campaigns/<name>/` (layout below). Every loop
   step re-reads the files it needs — never rely on conversation memory. This makes the
   loop work identically whether the roles run inline in a single agent or as separate
@@ -27,7 +28,7 @@ and never runs solves itself.
 - **Iteration meshes stay ≤ ~9k triangles** (see `spec.json` → `mesh.max_triangles`).
   Fine settings are reserved for the single final verification trial.
 - Tools you refer to generically: the boundary-lab MCP tools (`list_generators`,
-  `generate`, `solve`, `get_run`, `list_runs`), shell commands, and plain file
+  `generate`, `solve`, `get_job`, `list_jobs`), shell commands, and plain file
   reads/writes. Pass your absolute working directory as `workspace` on every MCP call.
 - **"Repository root"** throughout means the checkout that hosts the running bridge
   (`bridge/data/` lives there). Campaign paths and score commands resolve against it,
@@ -44,7 +45,7 @@ Exactly one orchestrator may drive a campaign directory at a time.
    - If it exists: read it and STOP. Report the holder and timestamp to the user, and ask
      them to check for a live campaign (bridge dashboard at http://127.0.0.1:4821 shows
      queued/running solves) before deleting a stale LOCK by hand. If the timestamp is
-     less than ~2 hours old, assume the campaign is live. Never delete another run's
+     less than ~2 hours old, assume the campaign is live. Never delete another campaign's
      LOCK yourself.
    - If it does not exist: create it (creating the campaign directory first if needed)
      with an **atomic exclusive create** — an operation that fails if the file already
@@ -58,7 +59,7 @@ Exactly one orchestrator may drive a campaign directory at a time.
    verification trial, which can be the longest — so its age reflects liveness.
 3. Remove the LOCK when the loop ends — on normal finalization, on STOP, and on any
    error path where you abandon the campaign. On an error path, first note any in-flight
-   solve run id in `log.md` so the next orchestrator does not start a trial against an
+   solve job id in `log.md` so the next orchestrator does not start a trial against an
    occupied GPU. If you crash without removing the LOCK, the freshness check above lets
    the next orchestrator (and the user) reason about it.
 
@@ -123,7 +124,7 @@ For each trial:
    playbook — and returns only after it has appended its `trials.jsonl` line. Wait for
    it; never start anything else meanwhile.
 7. Re-read the last line of `trials.jsonl` (trust the file, not the report). If no line
-   for this trial appeared (runner crashed): check `list_runs`/`get_run` for a solve
+   for this trial appeared (runner crashed): check `list_jobs`/`get_job` for a solve
    still queued or running for this trial — if one exists, keep waiting (poll with ~30 s
    sleeps) until it is terminal; do NOT start another trial. Once nothing is in flight,
    append the missing line yourself with `status: "failed"`, `score: null`, and a note
@@ -179,15 +180,15 @@ does not duplicate them.
    not confirm, leave `"verified": false` and record the discrepancy in `log.md` — the
    user should know the iteration-fidelity score was not reproduced.
 4. Append a closing summary to `log.md`: trials used, best trial, final params, score and
-   subscores, and the plot/preview URLs from the verify run's `get_run` artifacts (URLs
+   subscores, and the plot/preview URLs from the verify job's `get_job` artifacts (URLs
    only — never paste data arrays).
 5. Remove the LOCK. Report the summary to the user.
 
 ## Campaign state layout (`runs/campaigns/<name>/`)
 
 Text-only state; it belongs in git (`.gitignore` explicitly un-ignores
-`/runs/campaigns/`). Heavy outputs stay in `bridge/data/runs/<runId>/` and are referenced
-by run id.
+`/runs/campaigns/`). Heavy outputs stay in `bridge/data/jobs/<jobId>/` and are referenced
+by job id.
 
 ```
 runs/campaigns/cd90x60/
@@ -229,13 +230,15 @@ Notes:
   the scorer contract, unlike generator params, which must come from `list_generators`).
 - `fixed_params` are merged into every proposal **by the designer** and must not be
   varied; the trial-runner passes the designer's params through verbatim.
-- `solve`/`solve_verify` fields map directly onto the `solve` MCP tool's arguments.
-  `symmetry` is one of `off` / `x` / `xy`; anything but `off` requires the generator to
+- `solve`/`solve_verify` fields map directly onto the `solve` MCP tool's arguments
+  (`fmin`, `fmax`, `count`, `backend`, `symmetry`, and optionally `target`). Omit `target`
+  to solve on the local GPU; set it to a target id from `list_targets` to run the campaign
+  on remote compute instead. `symmetry` is one of `off` / `x` / `xy`; anything but `off` requires the generator to
   emit a reduced (unmirrored) mesh — if the first trial fails with a symmetry/mesh
   error, re-create the spec with `"symmetry": "off"`.
 - `solve_timeout_min` (and `solve_verify_timeout_min` for verify trials, default
   3 × `solve_timeout_min`) is enforced by the trial-runner, which cancels a timed-out
-  run through the bridge HTTP API.
+  job through the bridge HTTP API.
 - `mesh.max_triangles` / `min_triangles` gate the **effective solved** triangle count
   (full count ÷ 2 for symmetry `x`, ÷ 4 for `xy` — the solver receives the reduced
   mesh); see `trial-runner.md`. These are this campaign's own budget knobs — nothing
@@ -262,10 +265,11 @@ trial          integer, 1-based, strictly increasing
 ts             ISO-8601 UTC timestamp when the line was written
 stage          "screen" | "refine" | "verify"
 params         full generator params object as passed to generate
-mesh_run_id    bridge run id of the generate run (null only if no run id was returned)
-solve_run_id   bridge run id of the solve run (null if the solve was never started)
+mesh_job_id    bridge job id of the generate job (null only if no job id was returned)
+solve_job_id   bridge job id of the solve job (null if the solve was never started)
 triangles      triangle count from generate (null if unavailable)
-solve_settings the solve settings used, copied from spec (null if no solve started)
+solve_settings the solve settings used, copied from spec — fmin/fmax/count/backend/
+               symmetry (+ target when set) (null if no solve started)
 score          scalar score from the scorer, higher is better — null on any failure
 subscores      per-objective subscores object from the scorer (null on failure)
 key_metrics    {h_bw_mean_deg, v_bw_mean_deg, h_bw_rms_dev, v_bw_rms_dev,
@@ -277,13 +281,13 @@ note           one short human sentence (what was tried / why it failed)
 Successful trial:
 
 ```json
-{"trial": 7, "ts": "2026-08-06T15:42:10Z", "stage": "refine", "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_run_id": "r_a1b2c3", "solve_run_id": "r_d4e5f6", "triangles": 7420, "solve_settings": {"fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy"}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "key_metrics": {"h_bw_mean_deg": 88.2, "v_bw_mean_deg": 57.5, "h_bw_rms_dev": 4.1, "v_bw_rms_dev": 6.3, "spdi_rms_d2_db": 0.9, "ripple_pp_db": 2.1, "bbox_mm": [320, 180, 240]}, "status": "ok", "note": "wider mouth for LF pattern control, slot unchanged"}
+{"trial": 7, "ts": "2026-08-06T15:42:10Z", "stage": "refine", "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "triangles": 7420, "solve_settings": {"fmin": 800, "fmax": 16000, "count": 24, "backend": "beat_cuda", "symmetry": "xy"}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "key_metrics": {"h_bw_mean_deg": 88.2, "v_bw_mean_deg": 57.5, "h_bw_rms_dev": 4.1, "v_bw_rms_dev": 6.3, "spdi_rms_d2_db": 0.9, "ripple_pp_db": 2.1, "bbox_mm": [320, 180, 240]}, "status": "ok", "note": "wider mouth for LF pattern control, slot unchanged"}
 ```
 
 Failed trial (mesh gate — solve never started):
 
 ```json
-{"trial": 8, "ts": "2026-08-06T15:49:02Z", "stage": "refine", "params": {"mouth_width_mm": 380, "mouth_height_mm": 220, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_run_id": "r_g7h8i9", "solve_run_id": null, "triangles": 11250, "solve_settings": null, "score": null, "subscores": null, "key_metrics": null, "status": "failed", "note": "mesh 11250 triangles > max 9000 — solve skipped"}
+{"trial": 8, "ts": "2026-08-06T15:49:02Z", "stage": "refine", "params": {"mouth_width_mm": 380, "mouth_height_mm": 220, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "mesh_job_id": "r_g7h8i9", "solve_job_id": null, "triangles": 11250, "solve_settings": null, "score": null, "subscores": null, "key_metrics": null, "status": "failed", "note": "mesh 11250 triangles > max 9000 — solve skipped"}
 ```
 
 Failures always carry `score: null` — never `0`, which would poison score statistics.
@@ -304,7 +308,7 @@ appends are safe.
 ### `best.json` — example
 
 ```json
-{"trial": 7, "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "mesh_run_id": "r_a1b2c3", "solve_run_id": "r_d4e5f6", "verified": false}
+{"trial": 7, "params": {"mouth_width_mm": 320, "mouth_height_mm": 180, "slot_length_mm": 60, "throat_diameter_mm": 25.4}, "score": 0.842, "subscores": {"h_bw": 0.91, "v_bw": 0.85, "smoothness": 0.78, "ripple": 0.80}, "mesh_job_id": "r_a1b2c3", "solve_job_id": "r_d4e5f6", "verified": false}
 ```
 
 `trial` stays the champion's iteration trial number; verification only flips `verified`.

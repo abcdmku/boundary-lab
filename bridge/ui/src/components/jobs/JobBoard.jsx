@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { RunRow } from "./RunRow.jsx";
-import "./runs.css";
+import { JobRow } from "./JobRow.jsx";
+import "./jobs.css";
 
-export function RunBoard({ runs, api, refetch, onOpenLightbox }) {
+export function JobBoard({ jobs, api, refetch, onOpenLightbox }) {
   // Expansion state lives here (not per-row) so link chips on one row can
   // open and scroll to another row.
   const [openIds, setOpenIds] = useState(() => new Set());
@@ -15,7 +15,7 @@ export function RunBoard({ runs, api, refetch, onOpenLightbox }) {
       return next;
     });
 
-  const focusRun = (id) => {
+  const focusJob = (id) => {
     setOpenIds((prev) => {
       if (prev.has(id)) return prev;
       const next = new Set(prev);
@@ -23,30 +23,30 @@ export function RunBoard({ runs, api, refetch, onOpenLightbox }) {
       return next;
     });
     requestAnimationFrame(() => {
-      const el = document.getElementById("run-" + id);
+      const el = document.getElementById("job-" + id);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   };
 
   return (
-    <main className="run-board">
+    <main className="job-board">
       <div className="mb-2 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
-        Runs
+        Jobs
       </div>
-      {!runs.length ? (
-        <div className="run-tab-empty">No runs yet</div>
+      {!jobs.length ? (
+        <div className="job-tab-empty">No jobs yet</div>
       ) : (
-        runs.map((run) => (
-          <RunRow
-            key={run.id}
-            run={run}
-            runs={runs}
+        jobs.map((job) => (
+          <JobRow
+            key={job.id}
+            job={job}
+            jobs={jobs}
             api={api}
             refetch={refetch}
             onOpenLightbox={onOpenLightbox}
-            open={openIds.has(run.id)}
-            onToggle={() => toggle(run.id)}
-            onNavigate={focusRun}
+            open={openIds.has(job.id)}
+            onToggle={() => toggle(job.id)}
+            onNavigate={focusJob}
           />
         ))
       )}

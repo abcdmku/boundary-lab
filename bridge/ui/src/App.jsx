@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { Topbar } from "./components/Topbar.jsx";
 import { Rail } from "./components/rail/Rail.jsx";
-import { RunBoard } from "./components/runs/RunBoard.jsx";
+import { JobBoard } from "./components/jobs/JobBoard.jsx";
 import { Toasts } from "./components/Toasts.jsx";
 import { Lightbox } from "./components/Lightbox.jsx";
 import { useBridgeState, apiRequest } from "./lib/api";
@@ -19,8 +19,8 @@ export default function App() {
       <Topbar connected={connected} />
       <div className="flex items-stretch">
         <Rail generators={state?.generators} />
-        <RunBoard
-          runs={state?.runs || []}
+        <JobBoard
+          jobs={state?.jobs || []}
           api={api}
           refetch={refetch}
           onOpenLightbox={setLightboxUrl}

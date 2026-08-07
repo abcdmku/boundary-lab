@@ -18,15 +18,15 @@ function ScoreLine({ summary }) {
   const score = summary.score;
   const head =
     typeof score === "number" && Number.isFinite(score) ? `score ${fmtScore(score)} — ` : "";
-  return <div className="run-footer-scores">{head + parts.join(" · ")}</div>;
+  return <div className="job-footer-scores">{head + parts.join(" · ")}</div>;
 }
 
 // Quiet footer: subscore breakdown (when metrics exist) + at most three small
 // download links — mesh (the *_clean.msh, or first .msh), config, log — plus
-// the error text for failed runs.
+// the error text for failed jobs.
 // Nothing else; the full artifact list is the AI's business over MCP.
-export function RunFooter({ run }) {
-  const arts = run.artifacts || [];
+export function JobFooter({ job }) {
+  const arts = job.artifacts || [];
   const nameOf = (a) => (a.name || "").toLowerCase();
   const mesh =
     arts.find((a) => nameOf(a).endsWith("_clean.msh")) ||
@@ -39,18 +39,18 @@ export function RunFooter({ run }) {
     log && { label: "log", ...log },
   ].filter(Boolean);
 
-  const showError = run.status === "failed" && run.error;
-  const scoreLine = ScoreLine({ summary: run.summary });
+  const showError = job.status === "failed" && job.error;
+  const scoreLine = ScoreLine({ summary: job.summary });
   if (!links.length && !showError && !scoreLine) return null;
 
   return (
-    <div className="run-footer">
+    <div className="job-footer">
       {scoreLine}
       {links.length > 0 && (
         <div>
           {links.map((a, i) => (
             <span key={a.url}>
-              {i > 0 && <span className="run-footer-sep">·</span>}
+              {i > 0 && <span className="job-footer-sep">·</span>}
               <a href={a.url} target="_blank" rel="noreferrer" title={a.name}>
                 {a.label}
               </a>
@@ -58,7 +58,7 @@ export function RunFooter({ run }) {
           ))}
         </div>
       )}
-      {showError && <div className="run-footer-error">{run.error}</div>}
+      {showError && <div className="job-footer-error">{job.error}</div>}
     </div>
   );
 }

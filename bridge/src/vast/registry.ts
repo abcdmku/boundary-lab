@@ -4,7 +4,7 @@
  *
  * Persisted as the "vast" section of DATA_DIR/state.json (see
  * store.readSection/writeSection) so it survives a bridge restart and rides
- * the same atomic write and the same SSE change channel as the run ledger.
+ * the same atomic write and the same SSE change channel as the job ledger.
  *
  * The registry is a CACHE of intent, never the source of truth about billing:
  * vast.ai is authoritative for whether a contract exists and what it costs.

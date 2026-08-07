@@ -1,14 +1,21 @@
 import { Fragment } from "react";
 
-// Static reference, no interactivity — the six MCP tools this bridge
-// exposes (bridge/src/mcp.ts), so a human glancing at the rail knows the
-// AI's vocabulary without needing to ask.
+// Static reference, no interactivity — the MCP tools this bridge exposes
+// (bridge/src/mcp.ts), so a human glancing at the rail knows the AI's
+// vocabulary without needing to ask.
 const TOOLS = [
   ["list_generators", "Lists generators, ids, and schemas"],
+  ["list_targets", "Lists local and remote compute"],
   ["generate", "Runs a generator, builds a mesh"],
-  ["solve", "Queues a BEM solve on mesh"],
-  ["get_run", "Gets one run's status and artifacts"],
-  ["list_runs", "Lists recent runs, newest first"],
+  ["solve", "Queues one BEM solve on a mesh"],
+  ["create_mesh_jobs", "Drafts meshes from param variants"],
+  ["create_solve_jobs", "Drafts a solve sweep as one batch"],
+  ["update_job", "Edits a draft before it launches"],
+  ["launch_jobs", "Starts drafts by id or batch"],
+  ["cancel_jobs", "Cancels jobs by id or batch"],
+  ["delete_job", "Deletes a job and its artifacts"],
+  ["get_job", "Gets one job's status and artifacts"],
+  ["list_jobs", "Lists recent jobs, newest first"],
   ["spawn_thread", "Spawns a new t3 agent thread"],
 ];
 

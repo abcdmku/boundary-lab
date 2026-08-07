@@ -64,7 +64,8 @@ test("an entry persists to the vast section of state.json", () => {
   const persisted = JSON.parse(fs.readFileSync(path.join(dataDir, "state.json"), "utf8"));
   assert.equal(persisted.vast.instances.length, 1);
   assert.equal(persisted.vast.instances[0].id, 20250806);
-  assert.ok(Array.isArray(persisted.runs), "the run ledger must be untouched");
+  assert.ok(Array.isArray(persisted.jobs), "the job ledger must be untouched");
+  assert.equal(persisted.version, 2);
 });
 
 test("adding the same id twice replaces rather than duplicates", () => {

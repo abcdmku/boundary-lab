@@ -12,6 +12,7 @@ GPU-safe job queue.
 cd bridge
 npm install
 npm start
+npm test          # model / draft / batch / lane-concurrency tests
 ```
 
 Dashboard: http://127.0.0.1:4821 — MCP: `POST http://127.0.0.1:4821/mcp`
@@ -25,6 +26,7 @@ Dashboard: http://127.0.0.1:4821 — MCP: `POST http://127.0.0.1:4821/mcp`
 | `BRIDGE_PUBLIC_URL` | `http://127.0.0.1:4821` | base for URLs handed to agents |
 | `PYTHON` | `python` | interpreter with `blab` installed |
 | `BLAB_JULIA_EXECUTABLE` | Julia 1.12.6 install path | passed to solver children |
+| `BRIDGE_REMOTE_CONCURRENCY` | `1` | default concurrent jobs per remote instance |
 | `T3_BASE_URL` / `T3_TOKEN` | unset | optional; enables thread spawn + wake-up |
 
 Without t3 configured everything works except thread orchestration.
@@ -59,14 +61,19 @@ outright with `403`. Nothing rents or destroys automatically, ever. Note that
 | `VAST_CACHE_ROOT` | `/workspace/blab` | persistent path caching venv + Julia depot |
 
 **Running a solve on one.** Once an instance is provisioned and healthy, pass its target
-id to a solve: `POST /api/solve {"meshRunId":"abc123","target":"vast:20250806"}`, or the
-`target` argument of the MCP `solve` tool. `GET /api/vast/targets` (or the MCP
-`list_compute_targets`) lists what is selectable. `target` also accepts `"local"` (the
-default) and a bare `http://host:port` for any `blab server` this bridge does not manage.
-Under the hood the run is dispatched as `blabctl solve --backend server --server-url ...`,
-which inlines the config and mesh into the request — no shared filesystem needed. A
-target that is not provisioned and healthy is refused when the solve is submitted, rather
-than failing an hour later.
+id to a solve: `POST /api/solve {"meshJobId":"abc123","target":"vast:20250806"}`, or the
+`target` argument of the MCP `solve` / `create_solve_jobs` tools. `GET /api/targets` (or
+the MCP `list_targets`) lists what is selectable; `GET /api/vast/targets?refresh=true` is
+the same list with a fresh health probe per instance. `target` also accepts `"local"`
+(the default) and a bare `http://host:port` for any `blab server` this bridge does not
+manage. Under the hood the job is dispatched as
+`blabctl solve --backend server --server-url ...`, which inlines the config and mesh into
+the request — no shared filesystem needed. A target that is not provisioned and healthy
+is refused when the solve is submitted (404 unknown / 409 not ready), rather than failing
+an hour later.
+
+Each rented instance gets **its own queue lane**, so a batch spread over three boxes runs
+three solves at once while the local GPU stays strictly serialized. See "Queue lanes".
 
 **Provisioning** pipes `provision/vast_bootstrap.sh` over SSH and runs it. The script is
 idempotent: each slow stage (apt, repo, python, julia) is stamped with a fingerprint of
@@ -80,25 +87,298 @@ are baked in at create time and are not added to existing instances.
 
 ## Layout
 
-- `src/` — server: config, store, queue (mesh + solve lanes, concurrency 1 each), MCP tools, t3 client
+- `src/` — server: config, store, targets, queue (per-target lanes), MCP tools, t3 client
 - `src/vast/` — vast.ai compute provider: client, instance registry, SSH provisioning, `/api/vast` routes
 - `py/` — Python glue: `blabctl.py` (NDJSON CLI) + `generators/` (ATH waveguide, procedural axisymmetric horn)
 - `provision/` — `vast_bootstrap.sh`, the idempotent remote installer
+- `ui/` — dashboard (Vite + React)
 - `tests/` — `npm test` (node:test + fixtures; never touches the network)
-- `ui/` — static dashboard
-- `data/` — run state + artifacts (gitignored)
+- `data/` — job state + artifacts (gitignored)
 
-## Solving on another machine
+---
 
-`blabctl solve --backend server --server-url http://<host>:8765` sends the whole
-job (config + mesh, inlined) to a `blab server` elsewhere and streams results
-back, so a rented GPU box needs no shared filesystem. `blabctl remote-check
---server-url ...` preflights one: reachability, which solver it runs, whether it
-accepts symmetry-reduced meshes, and its GPU/VRAM. `BLAB_SERVER_URL` and
-`BLAB_SERVER_TOKEN` supply defaults. See `docs/Boundary Lab Server.md`.
+# The job model
+
+A **job** is one unit of work: `kind: "mesh"` (generate a mesh) or `kind: "solve"`
+(BEM solve on a finished mesh). Jobs exist *before* they run.
+
+```ts
+status: "draft" | "queued" | "running" | "done" | "failed" | "cancelled"
+```
+
+- **draft** — fully configured, editable, **never** enqueued. This is what lets the
+  board show 10 meshes ready and a rack of staged solves. A draft only starts when it
+  is explicitly launched.
+- **queued / running** — owned by the queue.
+- **done / failed / cancelled** — terminal.
+
+A job carries an execution **target** (where it runs) and an optional **batchId**
+(what sweep it belongs to).
+
+```ts
+type JobTarget =
+  | { type: "local" }
+  | { type: "remote"; instanceId?: string; serverUrl: string; label?: string }
+
+interface Job {
+  id: string;              // 6-char
+  kind: "mesh" | "solve";
+  name: string;
+  status: JobStatus;
+  createdAt: string;       // ISO-8601
+  updatedAt?: string;      // last draft edit
+  launchedAt?: string;     // draft -> queued
+  startedAt?: string;
+  finishedAt?: string;
+  generator?: string;      // mesh jobs
+  params: Record<string, unknown>;
+                           // mesh: generator params
+                           // solve: { meshJobId, fmin?, fmax?, count?, backend?, symmetry? }
+  target?: JobTarget;      // absent = local
+  batchId?: string;        // "b_xxxxxxxx"
+  batchName?: string;
+  parentJobId?: string;    // solve -> its mesh job
+  workspace?: string;
+  threadId?: string;
+  progress?: { stage: string; message: string; done?: number; total?: number };
+  pid?: number;
+  summary?: unknown;       // blabctl's result JSON
+  error?: string;
+  artifacts: { name: string; kind: ArtifactKind; url: string }[];
+}
+```
+
+`ArtifactKind` is `"preview" | "plot" | "mesh" | "data" | "config" | "log"`.
+Artifact URLs are always `/artifacts/<jobId>/<path>` — that shape is frozen (it is
+embedded in already-persisted summaries and campaign logs).
+
+## Queue lanes
+
+Lanes are keyed by **target**, each with its own concurrency:
+
+| lane key | contents | concurrency |
+| --- | --- | --- |
+| `local:mesh` | all mesh jobs (meshing never leaves the bridge host) | 1 |
+| `local:solve` | solves with `target.type === "local"` | 1 — **not configurable**, the GPU rule |
+| `remote:<instanceId>` or `remote:<serverUrl>` | solves pinned to that remote | from the target registry, default `BRIDGE_REMOTE_CONCURRENCY` (1) |
+
+So a batch spanning three remote instances runs three solves in parallel while local
+work stays strictly serialized. A remote solve is dispatched as
+`blabctl solve … --backend server --server-url <url>`; the job's own `backend` param
+is a *local* solver id and is not forwarded.
+
+Remote execution therefore needs a blabctl that understands `--server-url`. The bridge
+probes `blabctl solve --help` once (cached) and refuses a **remote launch** with a
+legible 409 if the flag is definitely absent, rather than letting argparse exit 2 with a
+cryptic log. The probe fails open: if it cannot tell (no python, a stubbed CLI, a
+timeout) the launch proceeds. Staging a remote *draft* is always allowed.
+
+## Persistence
+
+`data/state.json` is `{ "version": 2, "jobs": [...] }`. A v1 ledger (`{ "runs": [...] }`,
+`parentRunId`, `params.meshRunId`, job dirs under `data/runs/`) is migrated in place on
+first load: the original is copied to `state.json.v1.bak` first, and `data/runs/` is
+renamed to `data/jobs/`. Artifact URLs are untouched.
+
+blabctl records **absolute** paths (`result.json`'s `cleaned_msh_path`, the solve
+config's mesh reference, and the same strings mirrored into `job.summary`), and a later
+solve re-reads its mesh job's `result.json` and checks those files exist. So the
+directory move also rewrites the old root prefix everywhere it appears — in the ledger
+and in every `.json` / `.toml` / `.cfg` / `.ini` / `.txt` / `.yaml` file under the job
+dirs — in each of the three encodings those files use (native separators, JSON-escaped
+backslashes, forward slashes). Without that, every already-generated mesh would become
+unsolvable after the upgrade.
+
+`tests/live-migration-check.mts` verifies a real ledger end to end; run it against a
+**copy** of `bridge/data` before deploying a schema change.
+
+---
+
+# HTTP API
+
+All bodies and responses are JSON. Errors are `{ "error": "<message>" }` with 400
+(validation), 404 (unknown id) or 409 (wrong state).
+
+### `GET /api/state`
+The whole board in one shot (also the first SSE frame).
+```jsonc
+{
+  "generators": [...], "generatorsError": null,
+  "jobs": [Job, ...],                       // newest first
+  "queue": { "lanes": [
+    { "key": "local:solve", "kind": "solve", "targetId": "local",
+      "label": "local solve", "concurrency": 1,
+      "active": ["ab12cd"], "queued": ["ef34gh"] }
+  ]},
+  "targets": [ComputeTarget, ...],
+  "batches": [BatchSummary, ...],
+  "t3": { "configured": false },
+  "publicUrl": "http://127.0.0.1:4821"
+}
+```
+
+### `GET /api/targets`
+`{ "targets": [ { "id", "type": "local"|"remote", "label", "serverUrl"?, "concurrency", "status"?, "info"? } ] }`
+Always contains `local`. Remote entries come from the instance registry.
+
+### `POST /api/generators/refresh`
+Re-reads the python generator catalog. Returns the cache.
+
+### `POST /api/generate` — create **and launch** a mesh job
+Body: `{ generator: string, name?: string, params?: object, batchId?: string }`
+→ `Job`
+
+### `POST /api/solve` — create **and launch** one solve
+Body: `{ meshJobId: string, name?, fmin?, fmax?, count?, backend?, symmetry?,`
+`options?: {…same five…}, target?: Target, batchId?: string }`
+→ `Job`. Requires the mesh job to be `done`.
+
+`Target` accepts a string (`"local"`, a registry instance id, or an `http(s)` URL) or
+an object `{ type?: "local"|"remote", instanceId?, serverUrl?, label? }`. A remote
+target must resolve to a `serverUrl` (given directly or via a registered `instanceId`).
+
+### `GET /api/jobs`
+Query: `kind`, `status` (comma-separated), `batchId`, `parentJobId`, `limit`.
+→ `{ "jobs": [Job, ...] }`
+
+### `POST /api/jobs` — create **one draft**
+Body: `{ kind: "mesh"|"solve", name?, generator?, params?, meshJobId?, fmin?, fmax?,`
+`count?, backend?, symmetry?, options?, target?, batchId?, batchName? }`
+→ `Job` with `status: "draft"`. A solve draft only requires the mesh job to *exist*
+(it may still be running); "done" is checked at launch.
+
+### `POST /api/jobs/batch` — create a sweep
+```jsonc
+{
+  "kind": "solve",
+  "name": "cd90 sweep",              // batch label; each job's name derives from it
+  "meshJobIds": ["xclhn4", "9ycf74"],// or "meshJobId": "xclhn4"
+  "options": { "fmin": 800, "fmax": 16000, "count": 24, "symmetry": "off" },
+  "variants": [                      // one job per variant PER MESH (cross product)
+    { "symmetry": "xy" },
+    { "count": 48 },
+    { "name": "hires", "count": 96, "fmax": 20000,
+      "target": { "type": "remote", "instanceId": "vast-42" } }
+  ],
+  "target": { "type": "local" },     // default for variants that don't override
+  "batchId": "b_reuse_me",           // optional; a new one is minted otherwise
+  "launch": false                    // true = queue them immediately
+}
+```
+Mesh batches use `generator` + `params` and variants of the form
+`{ "name"?, "params": {...} }` (variant params are merged over the shared `params`).
+
+Validation is all-or-nothing: an unknown mesh id, an unknown target or a cross product
+over `MAX_BATCH_JOBS` (200) rejects the request before creating anything.
+
+→ `{ batchId, batchName?, created: number, jobs: [Job…], launched: [{jobId, lane, queuePosition}], skipped: [{jobId, reason}] }`
+
+### `POST /api/jobs/launch` — launch drafts
+Body: `{ jobIds?: string[], batchId?: string }` (either or both).
+→ `{ launched: [{ jobId, name, lane, queuePosition }], skipped: [{ jobId, reason }] }`
+Non-drafts and solves whose mesh is not `done` are *skipped*, not errors — they stay
+drafts and stay editable.
+
+### `POST /api/jobs/cancel` — cancel a set
+Body: `{ jobIds?: string[], batchId?: string }`
+→ `{ cancelled: [{ jobId, status }], skipped: [{ jobId, reason }] }`
+Queued jobs drop out immediately; running jobs have their process tree killed and
+reach `cancelled` asynchronously; drafts are closed as `cancelled`.
+
+### `GET /api/jobs/:id`
+→ `Job` plus `{ lane: string|null, queuePosition: number }` (0 = not in a lane).
+
+### `PATCH /api/jobs/:id` — edit a draft
+Body: any of `{ name, generator, params, meshJobId, fmin, fmax, count, backend,`
+`symmetry, options, target, batchId (null to ungroup), batchName }`
+→ the updated `Job`. **409** if the job is not a draft.
+
+### `POST /api/jobs/:id/launch`
+→ same shape as `/api/jobs/launch`.
+
+### `POST /api/jobs/:id/cancel`
+→ `Job`.
+
+### `POST /api/jobs/:id/rescan`
+Re-ingests the job directory (post-hoc plots, `metrics.json` score/subscores). → `Job`.
+
+### `DELETE /api/jobs/:id`
+→ `{ ok: true }`. **409** while running, or while the job is the mesh of a
+draft/queued/running solve.
+
+### `GET /api/batches`
+→ `{ "batches": [BatchSummary, ...] }`, newest batch first.
+```ts
+BatchSummary = { batchId, batchName?, kinds: ("mesh"|"solve")[], createdAt,
+                 total: number,
+                 counts: { draft, queued, running, done, failed, cancelled },
+                 jobIds: string[] }
+```
+
+### `GET /api/batches/:batchId`
+→ `BatchSummary & { jobs: [Job, ...] }`. 404 if the batch has no jobs.
+
+### `POST /api/batches/:batchId/launch` → same as `/api/jobs/launch` with that batch.
+### `POST /api/batches/:batchId/cancel` → same as `/api/jobs/cancel` with that batch.
+Both 404 on a batch id with no jobs.
+### `DELETE /api/batches/:batchId`
+→ `{ deleted: string[] }`. **409** if any job in the batch is queued or running.
+
+### `GET /api/events` (SSE)
+First frame `{"type":"state","state":<GET /api/state>}`, then on every mutation
+either `{"type":"job","job":<Job>}` or a full `{"type":"state",…}` frame. Treat it as
+a change ping and refetch if you prefer.
+
+### `GET /artifacts/:jobId/*`
+Serves a file from the job's directory (path-traversal guarded).
+
+---
+
+# MCP tools
+
+Every tool takes an optional `workspace` (your absolute cwd) so jobs are linked to
+your t3 thread and solve completions wake you up.
+
+| tool | arguments |
+| --- | --- |
+| `list_generators` | `workspace?` |
+| `list_targets` | `workspace?` |
+| `generate` | `generator`, `params?`, `name?`, `workspace?` — creates **and runs** one mesh, waits up to 120 s |
+| `solve` | `mesh_job_id`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `name?`, `batch_id?`, `workspace?` — creates **and queues** one solve, returns immediately |
+| `create_mesh_jobs` | `generator`, `params?`, `variants?: [{name?, params?}]`, `name?`, `batch_id?`, `launch?`, `workspace?` |
+| `create_solve_jobs` | `mesh_job_ids: string[]`, `variants?: [{name?, target?, fmin?, fmax?, count?, backend?, symmetry?}]`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `name?`, `batch_id?`, `launch?`, `workspace?` |
+| `update_job` | `job_id`, `name?`, `params?`, `mesh_job_id?`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `batch_id?` (empty string ungroups), `workspace?` |
+| `launch_jobs` | `job_ids?: string[]`, `batch_id?`, `workspace?` |
+| `cancel_jobs` | `job_ids?: string[]`, `batch_id?`, `workspace?` |
+| `delete_job` | `job_id`, `workspace?` |
+| `get_job` | `job_id`, `workspace?` |
+| `list_jobs` | `kind?`, `status?`, `batch_id?`, `limit?`, `workspace?` |
+| `spawn_thread` | `title`, `prompt`, `workspace?` |
+
+`target` on any tool is the same union as the HTTP API: a string id/URL, or
+`{type, instanceId?, serverUrl?}`.
 
 ## Adding a generator
 
 Drop a module in `py/generators/` exposing `SCHEMA` (id/title/description + JSON-Schema
 params) and `generate(params, out_dir, name, emit)`. It appears in the UI form builder
 and as an MCP `generate` target on next refresh — no server changes needed.
+
+## Solving on another machine
+
+`blabctl solve --backend server --server-url http://<host>:8765` sends the whole job
+(config + mesh, inlined) to a `blab server` elsewhere and streams results back, so a
+rented GPU box needs no shared filesystem. `blabctl remote-check --server-url …`
+preflights one: reachability, which solver it runs, whether it accepts
+symmetry-reduced meshes, and its GPU/VRAM. `BLAB_SERVER_URL` and `BLAB_SERVER_TOKEN`
+supply defaults. See `docs/Boundary Lab Server.md`.
+
+The bridge drives all of that through a job's `target`: pick a remote and the queue
+gives it its own lane and dispatches with `--backend server --server-url`.
+
+## Adding remote compute
+
+Call `registerTargetProvider()` from `src/targets.ts` at startup with a function
+returning `ComputeTarget[]`. The vast.ai instance registry does exactly this — its
+ready instances become selectable targets — and nothing else in the bridge needs to
+know about a specific cloud provider.

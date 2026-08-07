@@ -13,7 +13,7 @@
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/vast.key.test.ts tests/vast.client.test.ts tests/vast.normalize.test.ts tests/vast.registry.test.ts tests/vast.provision.test.ts tests/vast.routes.test.ts tests/vast.solve-target.test.ts"
+    "test": "tsx --test tests/store.test.ts tests/actions.test.ts tests/queue.test.ts tests/vast.key.test.ts tests/vast.client.test.ts tests/vast.normalize.test.ts tests/vast.registry.test.ts tests/vast.provision.test.ts tests/vast.routes.test.ts tests/vast.solve-target.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
