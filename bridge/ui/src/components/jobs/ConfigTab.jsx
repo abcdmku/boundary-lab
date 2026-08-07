@@ -23,7 +23,7 @@ const solveSettingsOf = (job) => {
  * its settings are locked and offers the only real alternative — clone it into
  * a fresh draft.
  */
-export function ConfigTab({ job, jobs, generators, targets, api, refetch, onOpenSolve }) {
+export function ConfigTab({ job, jobs, generators, targets, api, refetch, notify, onOpenSolve }) {
   const isDraft = job.status === "draft";
   const generator = (generators || []).find((g) => g.id === job.generator);
   const schema = generator?.params;
@@ -86,9 +86,11 @@ export function ConfigTab({ job, jobs, generators, targets, api, refetch, onOpen
       }
       const res = await api(`/api/jobs/${job.id}/launch`, { method: "POST" });
       refetch();
-      // launchJobs reports refusals instead of throwing — surface them.
+      // launchJobs reports refusals in `skipped` instead of throwing, so a
+      // draft that cannot start (mesh not done, target gone) would otherwise
+      // just sit there with no explanation.
       const skipped = res?.skipped?.[0];
-      if (skipped) throw new Error(skipped.reason);
+      if (skipped) notify?.(skipped.reason);
     } catch {
       /* toasted */
     } finally {

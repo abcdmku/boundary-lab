@@ -17,11 +17,15 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
 
   useEffect(() => {
     restoreRef.current = document.activeElement;
-    // Prefer the first real control so a form opens ready to type.
-    const focusable = panelRef.current?.querySelector(
-      "input:not([type=hidden]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)",
-    );
-    (focusable ?? panelRef.current)?.focus();
+    // Prefer the first real control so a form opens ready to type. Buttons are
+    // a fallback only — matching them in the same query would land focus on
+    // the close button, which precedes the form in DOM order.
+    const panel = panelRef.current;
+    const focusable =
+      panel?.querySelector(
+        ".modal-body input:not([type=hidden]):not(:disabled), .modal-body select:not(:disabled), .modal-body textarea:not(:disabled)",
+      ) ?? panel?.querySelector(".modal-body button:not(:disabled)");
+    (focusable ?? panel)?.focus();
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();

@@ -21,7 +21,7 @@ const STATUS_MOD = {
  * change with no jobId, which the client turns into a full-state refetch, so
  * `instance.progress` re-renders here as the bootstrap walks its stages.
  */
-export function InstanceCard({ instance: e, target, api, refetch, notify }) {
+export function InstanceCard({ instance: e, target, refetch, notify }) {
   const [confirm, setConfirm] = useState(null);
   const [busy, setBusy] = useState(null);
 

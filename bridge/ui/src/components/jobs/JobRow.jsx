@@ -91,6 +91,7 @@ export function JobRow({
           targets={targets}
           api={api}
           refetch={refetch}
+          notify={notify}
           onOpenLightbox={onOpenLightbox}
           onOpenSolve={onOpenSolve}
         />

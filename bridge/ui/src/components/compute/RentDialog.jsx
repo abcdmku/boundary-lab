@@ -60,13 +60,10 @@ export function RentDialog({ offer, defaults, maxPricePerHour, onClose, onDone, 
       onDone?.(res.data);
       onClose();
     } else {
-      setError(
-        res.status === 403
-          ? `${res.data.error}`
-          : res.status === 409
-            ? `${res.data.error}`
-            : res.data.error || `quote failed (${res.status})`,
-      );
+      // 403 (over this bridge's ceiling) and 409 (offer already gone) both
+      // carry a self-explanatory message from the server; show it verbatim and
+      // stay in the configure phase so nothing can be committed.
+      setError(res.data.error || `quote failed (${res.status})`);
       setPhase("configure");
     }
   };

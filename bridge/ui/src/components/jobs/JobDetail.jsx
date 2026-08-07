@@ -14,6 +14,7 @@ export function JobDetail({
   targets,
   api,
   refetch,
+  notify,
   onOpenLightbox,
   onOpenSolve,
 }) {
@@ -48,6 +49,7 @@ export function JobDetail({
             targets={targets}
             api={api}
             refetch={refetch}
+            notify={notify}
             onOpenSolve={onOpenSolve}
           />
         ) : tab === "Mesh" ? (

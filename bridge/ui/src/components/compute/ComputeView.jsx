@@ -2,6 +2,7 @@ import { LanesPanel } from "../queue/LanesPanel.jsx";
 import { TargetsPanel } from "./TargetsPanel.jsx";
 import { VastPanel } from "./VastPanel.jsx";
 import { fmtRate } from "../../lib/format";
+import { billingCount } from "../../lib/vast";
 import "./compute.css";
 
 /**
@@ -27,9 +28,8 @@ export function ComputeView({ state, refetch, notify, onNavigateJob }) {
         <div className="burn-banner">
           <span className="burn-rate">{fmtRate(burn)}</span>
           <span className="burn-note">
-            billing right now across{" "}
-            {(vast?.instances || []).filter((i) => i.status !== "destroyed").length} rented
-            instance(s). Only destroying an instance ends its charges.
+            billing right now across {billingCount(vast?.instances)} rented instance(s). Only
+            destroying an instance ends its charges.
           </span>
         </div>
       )}

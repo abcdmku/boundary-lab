@@ -5,6 +5,7 @@ import { OfferSearch } from "./OfferSearch.jsx";
 import { NumberInput } from "../ui/field.jsx";
 import { apiCall, json, useFetch } from "../../lib/api";
 import { fmtMoney, fmtRate } from "../../lib/format";
+import { billingCount, isManaged } from "../../lib/vast";
 import { cn } from "../../lib/cn";
 import "./compute.css";
 
@@ -25,7 +26,8 @@ export function VastPanel({ vast, targets, refetch, notify }) {
 
   const configured = vast?.configured ?? status?.configured ?? false;
   const instances = vast?.instances || [];
-  const liveInstances = instances.filter((i) => i.status !== "destroyed");
+  const managed = instances.filter(isManaged);
+  const billing = billingCount(instances);
   const burn = vast?.activeBurnRatePerHour ?? 0;
   const targetFor = (id) => (targets || []).find((t) => t.id === `vast:${id}`);
 
@@ -104,7 +106,7 @@ export function VastPanel({ vast, targets, refetch, notify }) {
         <span className="panel-actions">
           <div className="segmented" role="tablist" aria-label="vast.ai section">
             {[
-              ["instances", `Instances${liveInstances.length ? ` (${liveInstances.length})` : ""}`],
+              ["instances", `Instances${managed.length ? ` (${managed.length})` : ""}`],
               ["offers", "Rent a GPU"],
             ].map(([id, label]) => (
               <button
@@ -180,9 +182,9 @@ export function VastPanel({ vast, targets, refetch, notify }) {
           )}
           {burn > 0 && (
             <div className="panel-error">
-              {fmtRate(burn)} is billing right now across {liveInstances.length} instance
-              {liveInstances.length === 1 ? "" : "s"}. Stopping halts GPU charges but not storage —
-              only Destroy ends all billing.
+              {fmtRate(burn)} is billing right now across {billing} instance
+              {billing === 1 ? "" : "s"}. Stopping halts GPU charges but not storage — only Destroy
+              ends all billing.
             </div>
           )}
         </>
