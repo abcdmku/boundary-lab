@@ -441,7 +441,10 @@ export function BatchDialog({
                             })
                           }
                         >
-                          <input type="checkbox" readOnly checked={on} tabIndex={-1} />
+                          {/* purely the tick mark — the button carries the
+                              checkbox role, so this must not be announced or
+                              focused as a second control */}
+                          <input type="checkbox" readOnly checked={on} tabIndex={-1} aria-hidden />
                           <StatusDot status={m.status} />
                           <span className="mesh-item-name">{m.name || m.id}</span>
                           <span className="mesh-item-meta">
