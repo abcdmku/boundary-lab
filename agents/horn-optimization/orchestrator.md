@@ -217,7 +217,7 @@ this very example and scores with it.
   "objective": {
     "band_hz": [800, 16000],
     "coverage": { "horizontal_target_deg": 90, "vertical_target_deg": 60, "tolerance_deg": 10 },
-    "weights": { "coverage": 1.0, "di_smoothness": 0.5, "on_axis_ripple": 0, "size": 0.25 },
+    "weights": { "coverage": 1.0, "di_smoothness": 0.5, "on_axis_ripple": 0, "size": 0 },
     "size_limit_mm": { "width": 400, "height": 250, "depth": 300 }
   },
   "fixed_params": { "throat_diameter": 36 },
@@ -251,6 +251,17 @@ Notes:
   - `size_limit_mm` — `width`/`height`/`depth`, each optional. These are the **outer
     envelope**, which the generator's mouth dimensions do *not* equal (see
     `designer.md` → "Size budgeting"); the trial-runner gates on the same numbers.
+- **Weight a term 0 when it cannot discriminate between trials.** The example weights
+  both `size` and `on_axis_ripple` at 0 for this reason, and it is not a formality:
+  a term that returns the same value for every scored trial adds a constant to the score
+  without ever changing the ranking, which inflates the number `budget.target_score` is
+  compared against and can end a campaign early.
+  - `size` is a **hard gate** here — the trial-runner rejects any mesh exceeding
+    `size_limit_mm` *before* the solve, and `_size_penalty` returns exactly 1.0 for
+    everything within them, so every trial that reaches the scorer scores 1.0. Weighting
+    it would double-count the gate. (Keep `size_limit_mm` set regardless: the gate reads
+    it, and the subscore does discriminate when re-scoring runs that never passed a gate.)
+  - `on_axis_ripple` is unmeasurable on the local backends, per the next bullet.
 - The scorer (`python bridge/py/blabctl.py score`) writes `metrics.json` into the solve
   job directory: a scalar `score` normalized to 0–1 (higher is better), the four
   `subscores` under those same names, per-frequency arrays, and a `provenance` block.
