@@ -48,6 +48,7 @@ export function BatchDialog({
   generators,
   targets,
   initialMeshIds,
+  initialGeneratorId,
   api,
   refetch,
   onClose,
@@ -57,7 +58,9 @@ export function BatchDialog({
   const [meshIds, setMeshIds] = useState(() => new Set(initialMeshIds || []));
   const [meshQuery, setMeshQuery] = useState("");
   const [baseSettings, setBaseSettings] = useState({});
-  const [generatorId, setGeneratorId] = useState(() => (generators && generators[0]?.id) || "");
+  const [generatorId, setGeneratorId] = useState(
+    () => initialGeneratorId || (generators && generators[0]?.id) || "",
+  );
   const [baseParams, setBaseParams] = useState({});
   const [defaultTargetId, setDefaultTargetId] = useState("local");
   const [variants, setVariants] = useState(() => [newVariant()]);
@@ -122,6 +125,16 @@ export function BatchDialog({
       `${t.label} cannot take work: ${t.unavailableReason || t.status || "unavailable"}`,
     );
 
+  // Which fields the quick-sweep can vary. For a mesh batch that is the
+  // generator's schema, so the selection has to survive a generator change.
+  const sweepFields =
+    kind === "solve"
+      ? SOLVE_SWEEP_FIELDS
+      : Object.keys((schema && schema.properties) || {}).map((n) => [n, n]);
+  const activeSweepField = sweepFields.some(([id]) => id === sweepField)
+    ? sweepField
+    : (sweepFields[0]?.[0] ?? "");
+
   // ---- variant editing ------------------------------------------------
   const patchVariant = (key, patch) =>
     setVariants((prev) => prev.map((v) => (v.key === key ? { ...v, ...patch } : v)));
@@ -139,18 +152,18 @@ export function BatchDialog({
     }
     const made = [];
     for (const piece of pieces) {
-      const value = coerceSweepValue(sweepField, piece, schema);
+      const value = coerceSweepValue(activeSweepField, piece, schema);
       if (value === null) {
-        setSweepError(`“${piece}” is not a valid ${sweepField} value.`);
+        setSweepError(`“${piece}” is not a valid ${activeSweepField} value.`);
         return;
       }
       if (kind === "solve")
         made.push(
-          sweepField === "target"
+          activeSweepField === "target"
             ? newVariant({ targetId: String(value) })
-            : newVariant({ settings: { [sweepField]: value } }),
+            : newVariant({ settings: { [activeSweepField]: value } }),
         );
-      else made.push(newVariant({ params: { [sweepField]: value } }));
+      else made.push(newVariant({ params: { [activeSweepField]: value } }));
     }
     setSweepError(null);
     setSweepValues("");
@@ -268,11 +281,6 @@ export function BatchDialog({
   }
 
   // ---- builder view ---------------------------------------------------
-  const sweepFields =
-    kind === "solve"
-      ? SOLVE_SWEEP_FIELDS
-      : Object.keys((schema && schema.properties) || {}).map((n) => [n, n]);
-
   return (
     <Modal
       title={kind === "solve" ? "Batch solves" : "Batch meshes"}
@@ -496,7 +504,7 @@ export function BatchDialog({
                 style={{ gridTemplateColumns: "minmax(110px,150px) 1fr max-content", alignItems: "end" }}
               >
                 <Field label="quick sweep">
-                  <Select value={sweepField} onChange={(e) => setSweepField(e.target.value)}>
+                  <Select value={activeSweepField} onChange={(e) => setSweepField(e.target.value)}>
                     {sweepFields.map(([id, label]) => (
                       <option key={id} value={id}>
                         {label}
@@ -515,9 +523,9 @@ export function BatchDialog({
                       }
                     }}
                     placeholder={
-                      sweepField === "target"
+                      activeSweepField === "target"
                         ? (targets || []).map((t) => t.id).join(", ")
-                        : sweepField === "symmetry"
+                        : activeSweepField === "symmetry"
                           ? "off, x, xy"
                           : "24, 48, 96"
                     }

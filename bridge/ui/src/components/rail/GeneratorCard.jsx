@@ -32,12 +32,11 @@ function exampleFor(gen) {
   return `Generate a ${gen.title.toLowerCase()} with ${bits.join(", ")}, then solve.`;
 }
 
-// A generator entry is ONLY title + description + a copyable example
-// prompt behind a disclosure. Param discovery is the AI's job via
-// list_generators over MCP — a human doesn't need a param table to
-// prompt well. No card chrome: spacing separates entries, the chevron
-// is the only affordance.
-export function GeneratorCard({ generator }) {
+// A generator entry is title + description + a copyable example prompt behind
+// a disclosure, plus the two ways to drive it by hand: one configured job, or
+// a parameter sweep. Full param discovery is still the AI's job via
+// list_generators over MCP — the human form lives in the dialogs, not here.
+export function GeneratorCard({ generator, onConfigure, onSweep }) {
   return (
     <details className="group mb-1">
       <summary className="-mx-2 flex cursor-pointer list-none gap-1.5 rounded-md px-2 py-1.5 select-none hover:bg-accent [&::-webkit-details-marker]:hidden">
@@ -62,6 +61,20 @@ export function GeneratorCard({ generator }) {
           )}
         </span>
       </summary>
+      {(onConfigure || onSweep) && (
+        <div className="btn-group" style={{ margin: "4px 0 6px 20px" }}>
+          {onConfigure && (
+            <button type="button" className="btn btn--sm" onClick={onConfigure}>
+              New job…
+            </button>
+          )}
+          {onSweep && (
+            <button type="button" className="btn btn--ghost btn--sm" onClick={onSweep}>
+              Sweep…
+            </button>
+          )}
+        </div>
+      )}
       <ExamplePrompt text={exampleFor(generator)} />
     </details>
   );

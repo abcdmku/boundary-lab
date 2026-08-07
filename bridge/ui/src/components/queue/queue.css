@@ -1,0 +1,136 @@
+/* Queue lanes — "what is running where, and how deep is the line behind it".
+   Plain CSS on the shared tokens, like the rest of the board. */
+
+.lane-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.lane-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lane-pill--busy {
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  color: var(--foreground);
+}
+.lane-pill-label {
+  font-weight: 500;
+}
+.lane-pill-sep {
+  color: var(--border);
+}
+
+.lane-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+.lane {
+  padding: 10px 12px;
+  background: var(--card);
+}
+.lane--idle .lane-title {
+  color: var(--muted-foreground);
+}
+.lane-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.lane-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.lane-slots {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.lane-target {
+  margin-top: 1px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+.lane-slot-bar {
+  display: flex;
+  gap: 3px;
+  margin: 7px 0 6px;
+}
+.lane-slot {
+  height: 3px;
+  flex: 1 1 0;
+  border-radius: 999px;
+  background: var(--border);
+}
+.lane-slot--on {
+  background: var(--primary);
+}
+.lane-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.lane-job {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.lane-job:hover {
+  background: var(--accent);
+}
+.lane-job:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+.lane-job-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lane-job-meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.lane-queued-head {
+  margin: 6px 0 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.lane-empty {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
