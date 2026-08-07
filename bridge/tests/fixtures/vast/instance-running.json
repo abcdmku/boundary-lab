@@ -1,0 +1,46 @@
+{
+  "instances": {
+    "id": 20250806,
+    "machine_id": 4455,
+    "label": "boundary-lab-solver",
+    "gpu_name": "RTX 4090",
+    "num_gpus": 1,
+    "gpu_ram": 24564,
+    "cpu_ram": 128000,
+    "disk_space": 60.0,
+    "image_uuid": "nvidia/cuda:12.6.3-runtime-ubuntu24.04",
+    "image_runtype": "ssh ssh_direc ssh_proxy",
+    "actual_status": "running",
+    "intended_status": "running",
+    "cur_state": "running",
+    "next_state": "running",
+    "status_msg": "success, running nvidia/cuda:12.6.3-runtime-ubuntu24.04/ssh",
+    "dph_total": 0.3421,
+    "dph_base": 0.31,
+    "storage_cost": 0.0082,
+    "storage_total_cost": 0.0082,
+    "start_date": 1754400000.0,
+    "end_date": 2034617753.0,
+    "duration": 273608757.0,
+    "uptime_mins": null,
+    "is_bid": false,
+    "ssh_host": "ssh2281.vast.ai",
+    "ssh_port": 10882,
+    "ssh_idx": "2281",
+    "public_ipaddr": "65.130.162.74",
+    "ports": {
+      "22/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "33525" }],
+      "8765/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "33526" }]
+    },
+    "direct_port_start": -1,
+    "direct_port_end": -1,
+    "geolocation": "Washington, US",
+    "cuda_max_good": 12.4,
+    "reliability2": 0.9973,
+    "instance": {
+      "gpuCostPerHour": 0.31,
+      "diskHour": 0.0082,
+      "totalHour": 0.3182
+    }
+  }
+}

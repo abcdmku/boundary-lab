@@ -26,9 +26,17 @@ export interface ComputeTarget {
   serverUrl?: string;
   /** Max concurrent solve jobs on this target. Local is always 1 (GPU rule). */
   concurrency: number;
-  /** Free-form liveness hint from the provider ("running", "stopped", …). */
+  /**
+   * Can this target take work RIGHT NOW? A rented box that is still
+   * provisioning, or has not passed a health check, is listed (so the UI can
+   * show it and say why) but cannot be selected.
+   */
+  available: boolean;
+  /** Why `available` is false — shown to the user, and used as the refusal. */
+  unavailableReason?: string;
+  /** Free-form liveness hint from the provider ("ready", "provisioning", …). */
   status?: string;
-  /** Provider-specific extras (gpu name, cost, region) for display only. */
+  /** Provider-specific extras (gpu name, $/hour, region) for display only. */
   info?: Record<string, unknown>;
 }
 
@@ -47,10 +55,11 @@ export const DEFAULT_REMOTE_CONCURRENCY = Math.max(
 const localTarget = (): ComputeTarget => ({
   id: LOCAL_TARGET_ID,
   type: "local",
-  label: "Local machine",
+  label: "Local GPU",
   // HARD RULE: one solve at a time on this machine's GPU. Not configurable.
   concurrency: 1,
-  status: "online",
+  available: true,
+  status: "ready",
 });
 
 type Provider = () => ComputeTarget[];
@@ -84,6 +93,7 @@ export function listTargets(): ComputeTarget[] {
         ...target,
         type: "remote",
         concurrency: Math.max(1, target.concurrency || DEFAULT_REMOTE_CONCURRENCY),
+        available: target.available !== false,
       });
     }
   }
@@ -107,7 +117,32 @@ export function targetConcurrency(target: JobTarget | undefined): number {
   return DEFAULT_REMOTE_CONCURRENCY;
 }
 
-export class TargetError extends Error {}
+export class TargetError extends Error {
+  /**
+   * HTTP status the API layer should use. 404 = no such target, 409 = it
+   * exists but cannot take work yet, 400 = the request itself is malformed.
+   */
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * A remote target must be provably usable before a job is queued — a solve
+ * that fails an hour later because the box was never provisioned is far worse
+ * than an immediate, explanatory refusal.
+ */
+function requireAvailable(target: ComputeTarget) {
+  if (target.available) return;
+  throw new TargetError(
+    target.unavailableReason ??
+      `target "${target.id}" is "${target.status ?? "unavailable"}" and cannot take work yet`,
+    409,
+  );
+}
 
 /**
  * Does this checkout's blabctl accept `--server-url`?
@@ -169,8 +204,10 @@ export function normalizeTarget(input: unknown): JobTarget {
     if (!known)
       throw new TargetError(
         `unknown target "${id}" — call GET /api/targets (or the list_targets tool) for available ids`,
+        404,
       );
     if (known.type === "local") return { type: "local" };
+    requireAvailable(known);
     if (!known.serverUrl) throw new TargetError(`target "${id}" has no serverUrl yet`);
     return {
       type: "remote",
@@ -192,17 +229,23 @@ export function normalizeTarget(input: unknown): JobTarget {
   let serverUrl = typeof obj.serverUrl === "string" ? obj.serverUrl.trim() : "";
   let label = typeof obj.label === "string" ? obj.label : undefined;
 
-  if (!serverUrl && instanceId) {
+  if (instanceId) {
     const known = getTarget(instanceId);
-    if (!known)
+    if (!known && !serverUrl)
       throw new TargetError(
         `unknown remote target instanceId "${instanceId}" and no serverUrl given — ` +
           `call GET /api/targets for available ids`,
+        404,
       );
-    if (!known.serverUrl)
-      throw new TargetError(`remote target "${instanceId}" has no serverUrl yet (still starting?)`);
-    serverUrl = known.serverUrl;
-    label ??= known.label;
+    if (known) {
+      // A known instance is checked even when the caller pinned a URL: the
+      // registry is the authority on whether that box is ready.
+      requireAvailable(known);
+      if (!serverUrl && !known.serverUrl)
+        throw new TargetError(`remote target "${instanceId}" has no serverUrl yet (still starting?)`);
+      serverUrl ||= known.serverUrl!;
+      label ??= known.label;
+    }
   }
   if (!serverUrl)
     throw new TargetError("a remote target needs serverUrl (or an instanceId known to the registry)");

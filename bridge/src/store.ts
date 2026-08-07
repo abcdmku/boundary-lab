@@ -501,6 +501,7 @@ export function listBatchIds(): string[] {
   return [...seen.entries()].sort((a, b) => b[1].localeCompare(a[1])).map(([id]) => id);
 }
 
+// ---------- feature sections ----------
 // ---------- writes ----------
 function newId(): string {
   for (;;) {

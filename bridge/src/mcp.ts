@@ -24,6 +24,7 @@ import * as t3 from "./t3.ts";
 import { listTargets, targetLabel } from "./targets.ts";
 import { generatorsCache, compactGenerators } from "./generators.ts";
 import { resolveWorkspace, shellSnapshot } from "./threads.ts";
+import * as vastRegistry from "./vast/registry.ts";
 
 const workspaceArg = z
   .string()
@@ -168,14 +169,21 @@ export function buildMcpServer(): McpServer {
 
   server.tool(
     "list_targets",
-    "List the execution targets a solve can be sent to: the local machine (one solve at a time — " +
-      "the GPU rule) plus any registered remote solver instances, with their concurrency and " +
-      "status. Pass a target's `id` as the `target` argument of solve / create_solve_jobs.",
+    "List the machines a solve can run on: the local GPU (one solve at a time — the GPU rule) " +
+      "plus any rented vast.ai instances this bridge manages. Pass a target's `id` as the " +
+      "`target` argument of solve / create_solve_jobs / update_job. Only targets with " +
+      "available=true can take work; the rest carry unavailableReason saying why not (not " +
+      "provisioned, unhealthy, stopped). Also returns the queue lanes, so you can see what each " +
+      "target is already busy with. This tool is READ-ONLY and free; renting a GPU costs money, " +
+      "is never automatic, and is done through the dashboard or the /api/vast HTTP API with an " +
+      "explicit confirmation.",
     { workspace: workspaceArg },
     async () =>
       text({
         targets: listTargets(),
         lanes: queue.queueSnapshot().lanes,
+        // Surfaced so an agent can see, and report, that money is being spent.
+        activeBurnRatePerHour: Number(vastRegistry.activeBurnRatePerHour().toFixed(4)),
         ui: `${config.publicUrl}/`,
       }),
   );

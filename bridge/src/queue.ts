@@ -300,6 +300,12 @@ export function buildArgs(job: store.Job): string[] {
     ];
   }
   // solve: params = { meshJobId, fmin?, fmax?, count?, backend?, symmetry? }
+  //
+  // A remote target means the solve runs on another machine (a rented vast.ai
+  // GPU, or any reachable `blab server`): blabctl inlines the config and mesh
+  // into the request and streams results back, so no shared filesystem is
+  // needed. blabctl rejects --server-url unless the backend is `server`, and
+  // the local Julia path is meaningless there, so both are handled explicitly.
   const remote = job.target && job.target.type === "remote" ? job.target : null;
   const args = [
     "solve",

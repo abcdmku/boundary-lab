@@ -31,6 +31,7 @@
  *   POST   /api/batches/:batchId/cancel
  *   DELETE /api/batches/:batchId
  *   GET    /api/events                    SSE
+ *   /api/vast/*                           rented vast.ai GPUs (see src/vast/routes.ts)
  *   GET    /artifacts/:jobId/*            files from a job's directory
  */
 import express from "express";
@@ -44,8 +45,13 @@ import * as actions from "./actions.ts";
 import { listTargets } from "./targets.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
+import { vastRouter } from "./vast/routes.ts";
+import { registerVastTargets } from "./vast/targets.ts";
 
 store.loadStore();
+// Rented instances become selectable execution targets (and their own queue
+// lanes). Registering here keeps src/targets.ts provider-agnostic.
+registerVastTargets();
 
 // Graceful shutdown: kill active blabctl/Julia trees before exiting so a
 // service-manager restart never leaves an orphan solve holding the GPU.
@@ -317,6 +323,9 @@ app.get("/api/events", (req, res) => {
   store.emitter.on("change", onChange);
   req.on("close", () => store.emitter.off("change", onChange));
 });
+
+// ---------- compute providers: rented vast.ai GPUs ----------
+app.use("/api/vast", vastRouter);
 
 // ---------- artifacts: files from a job's directory ----------
 // The /artifacts/<id>/… path shape is frozen: artifact URLs are embedded in

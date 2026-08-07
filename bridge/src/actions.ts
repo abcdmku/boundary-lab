@@ -23,6 +23,8 @@ import {
   TargetError,
 } from "./targets.ts";
 import { generatorsCache, getGenerator } from "./generators.ts";
+import * as vastRegistry from "./vast/registry.ts";
+import { describeKey as describeVastKey } from "./vast/key.ts";
 
 export class ActionError extends Error {
   constructor(
@@ -41,6 +43,7 @@ export interface SolveOptions {
   symmetry?: string;
 }
 
+
 export const SOLVE_OPTION_KEYS = ["fmin", "fmax", "count", "backend", "symmetry"] as const;
 
 /** Guard-rail against a runaway sweep (meshes × variants). */
@@ -52,7 +55,7 @@ function target(input: unknown): store.JobTarget {
   try {
     return normalizeTarget(input);
   } catch (err) {
-    if (err instanceof TargetError) throw new ActionError(err.message);
+    if (err instanceof TargetError) throw new ActionError(err.message, err.status);
     throw err;
   }
 }
@@ -168,6 +171,8 @@ export function startSolve(input: {
   threadId?: string;
 }): store.Job {
   const mesh = requireMeshDone(input.meshJobId);
+  // Resolve before creating the job: an unusable target must fail the request,
+  // not leave a queued job that dies on dispatch.
   const jobTarget = target(input.target);
   requireTargetRunnable({ target: jobTarget });
   const job = store.createJob({
@@ -702,6 +707,8 @@ export function solveVramNote(
   options?: SolveOptions,
   jobTarget?: store.JobTarget,
 ): string | null {
+  // A remote solve consumes the RENTED box's VRAM, not this machine's, so a
+  // note about local capacity would be actively misleading.
   if (jobTarget && jobTarget.type === "remote") return null;
   const backend = (options?.backend ?? "beat_cuda").trim().toLowerCase();
   if (!LOCAL_GPU_BACKEND_ALIASES.has(backend)) return null;
@@ -815,6 +822,7 @@ export function rescanJob(id: string): store.Job {
 
 export function fullState() {
   const gens = generatorsCache();
+  const vastKey = describeVastKey();
   return {
     generators: gens.generators,
     generatorsError: gens.error ?? null,
@@ -824,5 +832,17 @@ export function fullState() {
     batches: listBatches(),
     t3: { configured: t3Configured() },
     publicUrl: config.publicUrl,
+    /**
+     * Rented compute. Cached registry state only — this is the SSE snapshot
+     * path and must never make an upstream call. Use GET /api/vast/instances
+     * to refresh against vast.ai. The key itself is never included, only
+     * whether one is configured and where it came from.
+     */
+    vast: {
+      configured: vastKey.configured,
+      keySource: vastKey.source,
+      instances: vastRegistry.list(),
+      activeBurnRatePerHour: Number(vastRegistry.activeBurnRatePerHour().toFixed(4)),
+    },
   };
 }

@@ -178,7 +178,7 @@ describe("lane concurrency", () => {
 
   test("a remote instance may declare a higher concurrency", () => {
     targets.registerTargetProvider(() => [
-      { id: "wide", type: "remote", label: "8x", serverUrl: "http://wide:8000", concurrency: 3 },
+      { id: "wide", type: "remote", label: "8x", serverUrl: "http://wide:8000", concurrency: 3, available: true },
     ]);
     const meshId = doneMesh();
     for (let i = 0; i < 4; i++) launchSolve(meshId, "wide");
@@ -191,7 +191,7 @@ describe("lane concurrency", () => {
     // Even if something claims the local machine can take 4 jobs, the lane
     // stays at 1 — the GPU rule is structural, not a setting.
     targets.registerTargetProvider(() => [
-      { id: "local", type: "remote", label: "spoof", serverUrl: "http://x", concurrency: 4 },
+      { id: "local", type: "remote", label: "spoof", serverUrl: "http://x", concurrency: 4, available: true },
     ]);
     const meshId = doneMesh();
     for (let i = 0; i < 3; i++) launchSolve(meshId, { type: "local" });

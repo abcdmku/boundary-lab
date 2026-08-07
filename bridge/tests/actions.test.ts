@@ -288,7 +288,7 @@ describe("targets", () => {
 
   test("a registered instance id resolves to its serverUrl", () => {
     targets.registerTargetProvider(() => [
-      { id: "vast-42", type: "remote", label: "vast 4090", serverUrl: "http://1.2.3.4:8000/", concurrency: 2 },
+      { id: "vast-42", type: "remote", label: "vast 4090", serverUrl: "http://1.2.3.4:8000/", concurrency: 2, available: true },
     ]);
     const draft = actions.createDraft({ kind: "solve", meshJobId: doneMesh(), target: "vast-42" });
     assert.deepEqual(draft.target, {
