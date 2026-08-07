@@ -133,14 +133,64 @@ def test_registry_threads_auth_and_timeouts():
         server_auth_token="  s3cret  ",
         server_health_timeout_s=2.5,
         server_request_timeout_s=45.0,
+        server_submit_timeout_s=1200.0,
         server_stream_idle_timeout_s=90.0,
         server_stream_retries=2,
     )
     assert backend.auth_token == "s3cret"
     assert backend.health_timeout_s == 2.5
     assert backend.request_timeout_s == 45.0
+    assert backend.submit_timeout_s == 1200.0
     assert backend.stream_idle_timeout_s == 90.0
     assert backend.stream_retries == 2
+
+
+def test_the_mesh_upload_gets_far_longer_than_a_control_request(monkeypatch, no_session):
+    """POST /jobs carries the whole mesh; 30 s is a cancel's budget, not an upload's."""
+    from blab.solvers.http_server import DEFAULT_REQUEST_TIMEOUT_S, DEFAULT_SUBMIT_TIMEOUT_S
+
+    assert DEFAULT_SUBMIT_TIMEOUT_S >= 10 * DEFAULT_REQUEST_TIMEOUT_S
+    monkeypatch.setattr("blab.solvers.http_server.query_server_health", lambda *_a, **_k: health())
+    backend = create_backend("server", server_url="http://remote:8765")
+    backend.create_session(solve_request("off"))
+    assert no_session["submit_timeout_s"] == DEFAULT_SUBMIT_TIMEOUT_S
+    assert no_session["request_timeout_s"] == DEFAULT_REQUEST_TIMEOUT_S
+
+
+def test_the_upload_timeout_applies_to_the_submit_and_not_to_cancel(monkeypatch):
+    from blab.solvers.http_server import DEFAULT_REQUEST_TIMEOUT_S
+
+    timeouts: list[float] = []
+
+    def fake_urlopen(req, timeout=None):
+        timeouts.append(timeout)
+        if req.get_method() == "POST":
+            return io.BytesIO(json.dumps({"job_id": "job-1234abcd"}).encode("utf-8"))
+        return FakeStream(
+            [
+                {"index": 0, "type": "queued"},
+                {"index": 1, "type": "started"},
+                initialized_event(),
+                {"index": 3, "type": "cancelled"},
+            ]
+        )
+
+    monkeypatch.setattr("blab.solvers.http_server.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "blab.solvers.http_server.solve_request_from_config_and_frequencies",
+        lambda *_a, **_k: {"config": {}},
+    )
+    session = HttpServerSession(
+        SolveRequest(
+            config=SimulationConfig(mesh_file="mesh.msh"),
+            frequencies_hz=np.array([1000.0], dtype=np.float32),
+        ),
+        "http://remote:8765",
+        submit_timeout_s=900.0,
+    )
+    session.stop()
+    assert timeouts[0] == 900.0  # POST /jobs, the mesh upload
+    assert timeouts[-1] == DEFAULT_REQUEST_TIMEOUT_S  # POST /cancel, a control request
 
 
 def test_registry_rejects_a_bad_url_rather_than_defaulting():
@@ -491,6 +541,72 @@ def test_remote_check_defaults_to_localhost(monkeypatch, capsys):
     assert lines[-1]["server_url"] == DEFAULT_SERVER_URL
 
 
+# --- which GPU is "the" GPU -----------------------------------------------
+#
+# A rented multi-GPU box is the normal case for a remote solve, and there
+# CUDA_VISIBLE_DEVICES decides where the solve lands. Naming the wrong card is
+# worse than naming none: it suppresses a real OOM warning on a smaller card and
+# invents one on a larger.
+
+TWO_GPUS = (
+    "0, GPU-1111aaaa, NVIDIA GeForce RTX 5080, 16303, 15000\n1, GPU-2222bbbb, NVIDIA H100 80GB HBM3, 81559, 80000\n"
+)
+
+
+@pytest.fixture
+def fake_nvidia_smi(monkeypatch):
+    import subprocess
+
+    import blab.gpu as blab_gpu
+
+    monkeypatch.setattr(blab_gpu.shutil, "which", lambda _name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(
+        blab_gpu.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(args=[], returncode=0, stdout=TWO_GPUS, stderr=""),
+    )
+    return blab_gpu
+
+
+def test_no_cuda_visible_devices_takes_the_first_card(fake_nvidia_smi):
+    assert fake_nvidia_smi.detect_gpu_memory({})["name"] == "NVIDIA GeForce RTX 5080"
+
+
+def test_cuda_visible_devices_selects_by_index(fake_nvidia_smi):
+    gpu = fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": "1"})
+    assert gpu["name"] == "NVIDIA H100 80GB HBM3"
+    assert gpu["index"] == 1
+    assert gpu["total_bytes"] == 81559 * 1024**2
+
+
+def test_cuda_visible_devices_selects_by_uuid(fake_nvidia_smi):
+    gpu = fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": "GPU-2222"})
+    assert gpu["name"] == "NVIDIA H100 80GB HBM3"
+
+
+def test_only_the_first_visible_device_matters(fake_nvidia_smi):
+    """CUDA device 0 is the head of the list, and that is where the solve runs."""
+    assert fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": "1,0"})["index"] == 1
+
+
+def test_an_empty_cuda_visible_devices_means_no_gpu(fake_nvidia_smi):
+    assert fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": ""}) is None
+
+
+def test_an_unmatched_selector_reports_unknown_rather_than_the_wrong_card(fake_nvidia_smi):
+    assert fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": "7"}) is None
+    assert fake_nvidia_smi.detect_gpu_memory({"CUDA_VISIBLE_DEVICES": "GPU-nosuch"}) is None
+
+
+def test_visible_device_selector_reads_the_environment():
+    from blab.gpu import visible_device_selector
+
+    assert visible_device_selector({}) is None
+    assert visible_device_selector({"CUDA_VISIBLE_DEVICES": "2,3"}) == "2"
+    assert visible_device_selector({"CUDA_VISIBLE_DEVICES": " 2 "}) == "2"
+    assert visible_device_selector({"CUDA_VISIBLE_DEVICES": ""}) == ""
+
+
 # --- server-side health payload -------------------------------------------
 
 
@@ -604,7 +720,7 @@ def make_session(monkeypatch, streams: list[FakeStream], *, stream_retries: int 
     monkeypatch.setattr(
         HttpServerSession,
         "_post_json",
-        lambda self, path, payload: {"job_id": "job-1234abcd"},
+        lambda self, path, payload, **_kwargs: {"job_id": "job-1234abcd"},
     )
     request_payload = SolveRequest(
         config=SimulationConfig(mesh_file="mesh.msh"),
@@ -726,7 +842,7 @@ def test_cancel_posts_once_against_the_remote_job(monkeypatch):
     monkeypatch.setattr(
         HttpServerSession,
         "_post_json",
-        lambda self, path, payload: posts.append(path) or {},
+        lambda self, path, payload, **_kwargs: posts.append(path) or {},
     )
     assert list(session.solve_stream(stop_requested=lambda: True)) == []
     assert posts == ["/jobs/job-1234abcd/cancel"]
@@ -738,7 +854,7 @@ def test_a_failed_cancel_is_retried(monkeypatch):
 
     attempts: list[str] = []
 
-    def flaky(self, path, payload):
+    def flaky(self, path, payload, **_kwargs):
         attempts.append(path)
         if len(attempts) == 1:
             raise RuntimeError("network hiccup")
@@ -772,7 +888,7 @@ def test_the_auth_token_rides_on_every_request(monkeypatch):
         "blab.solvers.http_server.solve_request_from_config_and_frequencies",
         lambda *_a, **_k: {"config": {}, "frequencies_hz": []},
     )
-    monkeypatch.setattr(HttpServerSession, "_post_json", lambda self, path, payload: {"job_id": "job-1"})
+    monkeypatch.setattr(HttpServerSession, "_post_json", lambda self, path, payload, **_kwargs: {"job_id": "job-1"})
     session = HttpServerSession(
         SolveRequest(
             config=SimulationConfig(mesh_file="mesh.msh"),

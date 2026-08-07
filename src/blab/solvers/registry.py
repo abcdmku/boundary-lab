@@ -155,6 +155,7 @@ def _create_http_server_backend(
     server_url: str | None = None,
     server_auth_token: str | None = None,
     server_request_timeout_s: float | None = None,
+    server_submit_timeout_s: float | None = None,
     server_health_timeout_s: float | None = None,
     server_stream_idle_timeout_s: float | None = None,
     server_stream_retries: int | None = None,
@@ -166,6 +167,7 @@ def _create_http_server_backend(
         DEFAULT_SERVER_URL,
         DEFAULT_STREAM_IDLE_TIMEOUT_S,
         DEFAULT_STREAM_RETRIES,
+        DEFAULT_SUBMIT_TIMEOUT_S,
         HttpServerBackend,
     )
 
@@ -176,6 +178,7 @@ def _create_http_server_backend(
         server_url or DEFAULT_SERVER_URL,
         auth_token=server_auth_token,
         request_timeout_s=DEFAULT_REQUEST_TIMEOUT_S if server_request_timeout_s is None else server_request_timeout_s,
+        submit_timeout_s=DEFAULT_SUBMIT_TIMEOUT_S if server_submit_timeout_s is None else server_submit_timeout_s,
         health_timeout_s=DEFAULT_HEALTH_TIMEOUT_S if server_health_timeout_s is None else server_health_timeout_s,
         stream_idle_timeout_s=(
             DEFAULT_STREAM_IDLE_TIMEOUT_S if server_stream_idle_timeout_s is None else server_stream_idle_timeout_s

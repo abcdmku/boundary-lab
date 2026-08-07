@@ -12,6 +12,7 @@ Nothing here ever decides that a solve is too big. A ``None`` return means
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -25,19 +26,52 @@ _MIB = 1024**2
 _NUMERIC = re.compile(r"\d+(\.\d+)?")
 
 
-def detect_gpu_memory() -> dict | None:
-    """Query the first NVIDIA GPU via nvidia-smi.
+def visible_device_selector(environ: dict | None = None) -> str | None:
+    """The CUDA device the solver will actually use, as CUDA_VISIBLE_DEVICES names it.
+
+    Returns the first entry of ``CUDA_VISIBLE_DEVICES`` -- an index like ``"1"``
+    or a ``GPU-...``/``MIG-...`` UUID -- because that is what CUDA presents as
+    device 0, which is what CUDA.jl picks up. ``None`` means the variable is
+    unset and every GPU is visible in nvidia-smi's own order. An empty value is
+    returned as ``""``: CUDA sees no devices at all.
+    """
+    raw = (environ if environ is not None else os.environ).get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return None
+    entries = [entry.strip() for entry in str(raw).split(",")]
+    return entries[0] if entries and entries[0] else ""
+
+
+def _row_matches(selector: str, index: str, uuid: str) -> bool:
+    if selector.isdigit():
+        return index == selector
+    # UUIDs may be given in an abbreviated form, which the driver accepts.
+    return bool(uuid) and uuid.startswith(selector)
+
+
+def detect_gpu_memory(environ: dict | None = None) -> dict | None:
+    """Query the NVIDIA GPU the solver will use, via nvidia-smi.
 
     Returns ``{"name", "total_bytes", "free_bytes"}``, or None when nvidia-smi
     is missing, fails, or returns nothing parseable (no NVIDIA GPU, an AMD/ROCm
     box, a driver hiccup). Callers must treat None as "unknown".
+
+    On a multi-GPU box -- a rented one, typically -- ``CUDA_VISIBLE_DEVICES``
+    decides which card the solve lands on, and it is frequently not physical GPU
+    0. Reporting the wrong card would be worse than reporting nothing: it would
+    suppress a real out-of-memory warning on a smaller card, or invent one on a
+    larger. So an unmatched or empty selector returns None rather than falling
+    back to the first row.
     """
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
+    selector = visible_device_selector(environ)
+    if selector == "":
+        return None
     try:
         completed = subprocess.run(  # noqa: S603 - fixed argv, resolved executable
-            [exe, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+            [exe, "--query-gpu=index,uuid,name,memory.total,memory.free", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -49,14 +83,18 @@ def detect_gpu_memory() -> dict | None:
         return None
     for line in completed.stdout.splitlines():
         fields = [field.strip() for field in line.split(",")]
-        if len(fields) < 3:
+        if len(fields) < 5:
             continue
-        name, total_mib, free_mib = fields[0], fields[1], fields[2]
+        index, uuid, name, total_mib, free_mib = fields[0], fields[1], fields[2], fields[3], fields[4]
         if not _NUMERIC.fullmatch(total_mib):
+            continue
+        if selector is not None and not _row_matches(selector, index, uuid):
             continue
         free_bytes = int(float(free_mib) * _MIB) if _NUMERIC.fullmatch(free_mib) else None
         return {
             "name": name,
+            "index": int(index) if index.isdigit() else None,
+            "uuid": uuid or None,
             "total_bytes": int(float(total_mib) * _MIB),
             "free_bytes": free_bytes,
         }

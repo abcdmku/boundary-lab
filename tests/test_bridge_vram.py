@@ -119,12 +119,14 @@ def test_detect_gpu_memory_parses_nvidia_smi(monkeypatch):
         blab_gpu.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="NVIDIA GeForce RTX 5080, 16303, 11530\n", stderr=""
+            args=[], returncode=0, stdout="0, GPU-abc123, NVIDIA GeForce RTX 5080, 16303, 11530\n", stderr=""
         ),
     )
     gpu = vram.detect_gpu_memory()
     assert gpu == {
         "name": "NVIDIA GeForce RTX 5080",
+        "index": 0,
+        "uuid": "GPU-abc123",
         "total_bytes": 16303 * 1024**2,
         "free_bytes": 11530 * 1024**2,
     }
@@ -145,7 +147,9 @@ def test_detect_gpu_memory_survives_unparseable_output(monkeypatch):
     monkeypatch.setattr(
         blab_gpu.subprocess,
         "run",
-        lambda *_a, **_k: subprocess.CompletedProcess(args=[], returncode=0, stdout="[N/A], [N/A], [N/A]\n", stderr=""),
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="[N/A], [N/A], [N/A], [N/A], [N/A]\n", stderr=""
+        ),
     )
     assert vram.detect_gpu_memory() is None
 

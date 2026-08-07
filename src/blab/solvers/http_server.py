@@ -43,9 +43,16 @@ from blab.solvers.base import (
 DEFAULT_SERVER_URL = "http://127.0.0.1:8765"
 ALLOWED_SCHEMES = ("http", "https")
 
-# Short, bounded waits for the small request/response endpoints.
+# Short, bounded waits for the small control endpoints (cancel, health).
 DEFAULT_REQUEST_TIMEOUT_S = 30.0
 DEFAULT_HEALTH_TIMEOUT_S = 5.0
+
+# POST /jobs is not a control request: it carries the whole mesh base64-inlined,
+# and the server base64-decodes and writes it to disk before replying. A 200 MB
+# mesh over a domestic uplink is minutes, not seconds, and a timeout here is
+# expensive -- the server may already have accepted the job, leaving it running
+# untracked. Generous, but still bounded so a black-holed connection ends.
+DEFAULT_SUBMIT_TIMEOUT_S = 1800.0
 
 # The events stream is long-lived and mostly idle: a single 20k-element
 # frequency step can take minutes with nothing to report. The server emits a
@@ -110,6 +117,7 @@ class HttpServerSession:
         *,
         auth_token: str | None = None,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+        submit_timeout_s: float = DEFAULT_SUBMIT_TIMEOUT_S,
         stream_idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
         stream_retries: int = DEFAULT_STREAM_RETRIES,
     ):
@@ -117,6 +125,7 @@ class HttpServerSession:
         self.server_url = normalize_server_url(server_url)
         self.auth_token = str(auth_token or "").strip() or None
         self.request_timeout_s = float(request_timeout_s)
+        self.submit_timeout_s = float(submit_timeout_s)
         self.stream_idle_timeout_s = float(stream_idle_timeout_s)
         self.stream_retries = max(0, int(stream_retries))
         self.job_id: str | None = None
@@ -188,6 +197,7 @@ class HttpServerSession:
                 self.request_payload.frequencies_hz,
                 include_assets=True,
             ),
+            timeout_s=self.submit_timeout_s,
         )
         self.job_id = str(job["job_id"])
         self._emit_status(f"Server job {self.job_id[:8]} queued")
@@ -312,10 +322,10 @@ class HttpServerSession:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         return request.Request(f"{self.server_url}{path}", data=data, headers=headers, method=method)
 
-    def _post_json(self, path: str, payload: dict) -> dict:
+    def _post_json(self, path: str, payload: dict, *, timeout_s: float | None = None) -> dict:
         req = self._build_request(path, data=json.dumps(payload).encode("utf-8"), method="POST")
         try:
-            with request.urlopen(req, timeout=self.request_timeout_s) as response:
+            with request.urlopen(req, timeout=self.request_timeout_s if timeout_s is None else timeout_s) as response:
                 return json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -421,6 +431,7 @@ class HttpServerBackend:
         *,
         auth_token: str | None = None,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+        submit_timeout_s: float = DEFAULT_SUBMIT_TIMEOUT_S,
         health_timeout_s: float = DEFAULT_HEALTH_TIMEOUT_S,
         stream_idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
         stream_retries: int = DEFAULT_STREAM_RETRIES,
@@ -428,6 +439,7 @@ class HttpServerBackend:
         self.server_url = normalize_server_url(server_url)
         self.auth_token = str(auth_token or "").strip() or None
         self.request_timeout_s = float(request_timeout_s)
+        self.submit_timeout_s = float(submit_timeout_s)
         self.health_timeout_s = float(health_timeout_s)
         self.stream_idle_timeout_s = float(stream_idle_timeout_s)
         self.stream_retries = max(0, int(stream_retries))
@@ -502,6 +514,7 @@ class HttpServerBackend:
             self.server_url,
             auth_token=self.auth_token,
             request_timeout_s=self.request_timeout_s,
+            submit_timeout_s=self.submit_timeout_s,
             stream_idle_timeout_s=self.stream_idle_timeout_s,
             stream_retries=self.stream_retries,
         )

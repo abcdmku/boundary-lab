@@ -100,6 +100,21 @@ server is a machine on the other side of the internet:
   reconnect that does deliver events resets the budget.
 - Cancellation works the same locally and remotely: `POST /jobs/{id}/cancel` is
   sent once per stop request, and retried on the next pass if that POST failed.
+- `POST /jobs` gets its own, far longer timeout (30 minutes) than the small
+  control endpoints (30 seconds). It carries the whole mesh base64-inlined and
+  the server decodes and writes it before replying, so a large mesh over a
+  domestic uplink takes minutes; timing out there is expensive, because the
+  server may already have accepted the job.
+
+## GPU Reporting And Multi-GPU Servers
+
+The `gpu` block in `/health` describes the card the *solver* will use, not
+simply physical GPU 0. On a multi-GPU machine `CUDA_VISIBLE_DEVICES` decides
+where the solve lands, so the server resolves its first entry — an index, or a
+`GPU-`/`MIG-` UUID — against `nvidia-smi` and reports that device, including its
+`index` and `uuid`. If the variable is empty, or names a device `nvidia-smi`
+does not list, `gpu` is `null`: reporting the wrong card would suppress a real
+out-of-memory warning on a smaller GPU, or invent one on a larger.
 
 ## Symmetry Support
 
@@ -131,7 +146,7 @@ For symmetry solves, the GUI still prepares and uploads the reduced-domain mesh 
 
 The server exposes a small HTTP API:
 
-- `GET /health`: returns status, configured solver, backing backend ID, capability flags, whether that solver uses the GPU (`solver_uses_gpu`), and the serving machine's GPU as `{"name", "total_bytes", "free_bytes"}` (`null` when nvidia-smi is unavailable). The GPU block is briefly cached, so `/health` stays cheap to poll.
+- `GET /health`: returns status, configured solver, backing backend ID, capability flags, whether that solver uses the GPU (`solver_uses_gpu`), and the serving machine's GPU as `{"name", "index", "uuid", "total_bytes", "free_bytes"}` (`null` when nvidia-smi is unavailable or the visible device cannot be resolved). The GPU block is briefly cached, so `/health` stays cheap to poll.
 - `POST /jobs`: submits a solve request with `SimulationConfig`, `frequencies_hz`, and optional uploaded assets.
 - `GET /jobs/{job_id}`: returns job status and artifact links.
 - `GET /jobs/{job_id}/events?since=0`: streams job events as newline-delimited JSON.
