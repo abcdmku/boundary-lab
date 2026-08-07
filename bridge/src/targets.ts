@@ -13,6 +13,8 @@
  * self-contained (it carries its own serverUrl), the registry only supplies
  * discovery and default concurrency.
  */
+import { spawnSync } from "node:child_process";
+import { config } from "./config.ts";
 import type { JobTarget } from "./store.ts";
 
 export interface ComputeTarget {
@@ -106,6 +108,45 @@ export function targetConcurrency(target: JobTarget | undefined): number {
 }
 
 export class TargetError extends Error {}
+
+/**
+ * Does this checkout's blabctl accept `--server-url`?
+ *
+ * Remote execution is a two-part contract: the bridge picks the target, the
+ * python CLI forwards the solve. If blabctl predates the flag, argparse would
+ * exit 2 and the job would fail with a cryptic log — so probe once (cached)
+ * and refuse the launch with a legible message instead.
+ *
+ * Deliberately fail-open: `null` (cannot tell — no python, a stubbed CLI, a
+ * timeout) allows the launch, because guessing "unsupported" would block
+ * perfectly good setups. Only a real argparse help banner that omits the flag
+ * is treated as a definite "no".
+ */
+let serverUrlSupport: boolean | null | undefined;
+
+export function blabctlSupportsServerUrl(): boolean | null {
+  if (serverUrlSupport !== undefined) return serverUrlSupport;
+  serverUrlSupport = null;
+  try {
+    const out = spawnSync(config.python, [config.blabctl, "solve", "--help"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+      cwd: config.repoRoot,
+    });
+    const text = `${out.stdout ?? ""}${out.stderr ?? ""}`;
+    // Only trust output that actually looks like argparse help.
+    if (/usage:/i.test(text)) serverUrlSupport = text.includes("--server-url");
+  } catch {
+    /* leave null — cannot tell */
+  }
+  return serverUrlSupport;
+}
+
+/** Test helper: forget the probe result. */
+export function resetServerUrlSupport() {
+  serverUrlSupport = undefined;
+}
 
 /**
  * Normalise whatever the API/MCP caller sent into a JobTarget.

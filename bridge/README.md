@@ -111,12 +111,30 @@ work stays strictly serialized. A remote solve is dispatched as
 `blabctl solve … --backend server --server-url <url>`; the job's own `backend` param
 is a *local* solver id and is not forwarded.
 
+Remote execution therefore needs a blabctl that understands `--server-url`. The bridge
+probes `blabctl solve --help` once (cached) and refuses a **remote launch** with a
+legible 409 if the flag is definitely absent, rather than letting argparse exit 2 with a
+cryptic log. The probe fails open: if it cannot tell (no python, a stubbed CLI, a
+timeout) the launch proceeds. Staging a remote *draft* is always allowed.
+
 ## Persistence
 
 `data/state.json` is `{ "version": 2, "jobs": [...] }`. A v1 ledger (`{ "runs": [...] }`,
 `parentRunId`, `params.meshRunId`, job dirs under `data/runs/`) is migrated in place on
 first load: the original is copied to `state.json.v1.bak` first, and `data/runs/` is
 renamed to `data/jobs/`. Artifact URLs are untouched.
+
+blabctl records **absolute** paths (`result.json`'s `cleaned_msh_path`, the solve
+config's mesh reference, and the same strings mirrored into `job.summary`), and a later
+solve re-reads its mesh job's `result.json` and checks those files exist. So the
+directory move also rewrites the old root prefix everywhere it appears — in the ledger
+and in every `.json` / `.toml` / `.cfg` / `.ini` / `.txt` / `.yaml` file under the job
+dirs — in each of the three encodings those files use (native separators, JSON-escaped
+backslashes, forward slashes). Without that, every already-generated mesh would become
+unsolvable after the upgrade.
+
+`tests/live-migration-check.mts` verifies a real ledger end to end; run it against a
+**copy** of `bridge/data` before deploying a schema change.
 
 ---
 

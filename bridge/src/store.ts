@@ -111,6 +111,8 @@ const stateFile = () => path.join(config.dataDir, "state.json");
  * process rather than losing every artifact — the resolved root is cached.
  */
 let jobsRootCache: string | null = null;
+/** Set when this process is the one that moved data/runs -> data/jobs. */
+let renamedJobDirsFrom: string | null = null;
 
 function jobsRoot(): string {
   if (jobsRootCache !== null) return jobsRootCache;
@@ -119,6 +121,7 @@ function jobsRoot(): string {
   if (!fs.existsSync(modern) && fs.existsSync(legacy)) {
     try {
       fs.renameSync(legacy, modern);
+      renamedJobDirsFrom = legacy;
       console.log(`[bridge] migrated job directories ${legacy} -> ${modern}`);
     } catch (err) {
       console.error(
@@ -130,6 +133,81 @@ function jobsRoot(): string {
   }
   jobsRootCache = modern;
   return modern;
+}
+
+/** Text files blabctl writes that can embed absolute job-directory paths. */
+const PATH_BEARING_EXTS = new Set([".json", ".toml", ".cfg", ".ini", ".txt", ".yaml", ".yml"]);
+const MAX_REWRITE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * blabctl records ABSOLUTE paths — `result.json`'s cleaned_msh_path, the solve
+ * config's mesh reference, and the same strings mirrored into job.summary. A
+ * later solve re-reads its mesh job's result.json and checks those paths
+ * exist, so moving data/runs -> data/jobs without rewriting them would quietly
+ * make every already-generated mesh unsolvable.
+ *
+ * Rewrites the old root prefix wherever it appears, in each of the three
+ * encodings those files use: native separators (TOML), JSON-escaped
+ * backslashes, and forward slashes.
+ */
+function rewriteMovedPaths(oldRoot: string, newRoot: string, jobs: Job[]) {
+  const encodings: [string, string][] = [
+    [oldRoot, newRoot],
+    [oldRoot.split("\\").join("\\\\"), newRoot.split("\\").join("\\\\")],
+    [oldRoot.split("\\").join("/"), newRoot.split("\\").join("/")],
+  ].filter(([from], i, all) => all.findIndex(([f]) => f === from) === i) as [string, string][];
+
+  const swap = (text: string) => {
+    let out = text;
+    for (const [from, to] of encodings) if (from !== to) out = out.split(from).join(to);
+    return out;
+  };
+
+  // 1. the ledger's own copy of those strings
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") return swap(value);
+    if (Array.isArray(value)) return value.map(visit);
+    if (value !== null && typeof value === "object")
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v)]));
+    return value;
+  };
+  for (const job of jobs) {
+    if (job.summary !== undefined) job.summary = visit(job.summary);
+    job.params = visit(job.params) as Record<string, unknown>;
+  }
+
+  // 2. the files on disk
+  let rewritten = 0;
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!PATH_BEARING_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
+      try {
+        if (fs.statSync(full).size > MAX_REWRITE_BYTES) continue;
+        const text = fs.readFileSync(full, "utf8");
+        const next = swap(text);
+        if (next !== text) {
+          fs.writeFileSync(full, next);
+          rewritten++;
+        }
+      } catch (err) {
+        console.error(`[bridge] could not rewrite paths in ${full}: ${err}`);
+      }
+    }
+  };
+  walk(newRoot);
+  console.log(`[bridge] rewrote embedded ${oldRoot} paths in ${rewritten} file(s)`);
 }
 
 export const jobDir = (id: string) => path.join(jobsRoot(), id);
@@ -205,6 +283,10 @@ export function loadStore() {
       }
     }
     state = migrated;
+  }
+  if (renamedJobDirsFrom !== null) {
+    rewriteMovedPaths(renamedJobDirsFrom, jobsRoot(), state.jobs);
+    renamedJobDirsFrom = null;
   }
   // The queue is in-memory only: anything mid-flight when the bridge died is
   // dead — but its OS process may not be. Reap verified orphans BEFORE the

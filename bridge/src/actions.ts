@@ -15,7 +15,13 @@ import path from "node:path";
 import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
-import { listTargets, normalizeTarget, TargetError } from "./targets.ts";
+import {
+  blabctlSupportsServerUrl,
+  listTargets,
+  normalizeTarget,
+  targetLabel,
+  TargetError,
+} from "./targets.ts";
 import { generatorsCache, getGenerator } from "./generators.ts";
 
 export class ActionError extends Error {
@@ -77,6 +83,21 @@ function requireMeshDone(meshJobId: string): store.Job {
   if (mesh.status !== "done")
     throw new ActionError(`mesh job ${meshJobId} is ${mesh.status}, not done`);
   return mesh;
+}
+
+/**
+ * Remote execution needs blabctl to understand `--server-url`. Checked at
+ * LAUNCH, not at draft creation: staging remote work against a bridge whose
+ * python layer is mid-upgrade is fine, silently failing at argparse is not.
+ */
+function requireTargetRunnable(job: Pick<store.Job, "target">) {
+  if (!job.target || job.target.type === "local") return;
+  if (blabctlSupportsServerUrl() === false)
+    throw new ActionError(
+      `this bridge's blabctl does not support --server-url, so it cannot dispatch to ` +
+        `${targetLabel(job.target)} — update the python layer, or retarget the job to local`,
+      409,
+    );
 }
 
 function solveParams(meshJobId: string, options?: SolveOptions): Record<string, unknown> {
@@ -147,11 +168,13 @@ export function startSolve(input: {
   threadId?: string;
 }): store.Job {
   const mesh = requireMeshDone(input.meshJobId);
+  const jobTarget = target(input.target);
+  requireTargetRunnable({ target: jobTarget });
   const job = store.createJob({
     kind: "solve",
     name: input.name?.trim() || `solve ${mesh.name}`,
     params: solveParams(input.meshJobId, input.options),
-    target: target(input.target),
+    target: jobTarget,
     parentJobId: input.meshJobId,
     ...(input.batchId ? { batchId: input.batchId } : {}),
     ...(input.workspace ? { workspace: input.workspace } : {}),
@@ -442,7 +465,10 @@ export function createBatch(input: BatchInput): BatchResult {
     for (const job of jobs) {
       // createJob already set status "queued"; validate then hand to the queue.
       try {
-        if (job.kind === "solve") requireMeshDone(String(job.params.meshJobId));
+        if (job.kind === "solve") {
+          requireMeshDone(String(job.params.meshJobId));
+          requireTargetRunnable(job);
+        }
       } catch (err) {
         store.finishJob(job.id, {
           status: "failed",
@@ -508,8 +534,10 @@ export function launchJobs(selector: JobSelector): LaunchResult {
       continue;
     }
     try {
-      if (job.kind === "solve") requireMeshDone(String(job.params.meshJobId));
-      else requireGenerator(String(job.generator ?? ""));
+      if (job.kind === "solve") {
+        requireMeshDone(String(job.params.meshJobId));
+        requireTargetRunnable(job);
+      } else requireGenerator(String(job.generator ?? ""));
     } catch (err) {
       result.skipped.push({ jobId: job.id, reason: err instanceof Error ? err.message : String(err) });
       continue;

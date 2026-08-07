@@ -24,7 +24,13 @@ const LEGACY = {
       finishedAt: "2026-08-05T10:01:00.000Z",
       generator: "ath_waveguide",
       params: { throat_diameter_mm: 25.4 },
-      summary: { triangles: 7420, files: { mesh: `${dataDir}/runs/0qi2g7/case.msh` } },
+      // blabctl records ABSOLUTE paths under the old runs root — both in the
+      // ledger's summary and in result.json on disk (written in `before`).
+      summary: {
+        triangles: 7420,
+        cleaned_msh_path: path.join(dataDir, "runs", "0qi2g7", "case_clean.msh"),
+        files: { mesh: path.join(dataDir, "runs", "0qi2g7", "case.msh") },
+      },
       artifacts: [{ name: "case.msh", kind: "mesh", url: "/artifacts/0qi2g7/case.msh" }],
     },
     {
@@ -97,6 +103,19 @@ before(async () => {
     fs.mkdirSync(path.join(dataDir, "runs", run.id), { recursive: true });
     fs.writeFileSync(path.join(dataDir, "runs", run.id, "job.log"), `log for ${run.id}\n`);
   }
+  // result.json is what a later solve re-reads to find its mesh; config.toml is
+  // the TOML form (native separators, no JSON escaping).
+  fs.writeFileSync(
+    path.join(dataDir, "runs", "0qi2g7", "result.json"),
+    JSON.stringify({
+      cleaned_msh_path: path.join(dataDir, "runs", "0qi2g7", "case_clean.msh"),
+      stl_path: path.join(dataDir, "runs", "0qi2g7", "case.stl"),
+    }),
+  );
+  fs.writeFileSync(
+    path.join(dataDir, "runs", "b6j1li", "config.toml"),
+    `mesh = "${path.join(dataDir, "runs", "0qi2g7", "case_clean.msh")}"\n`,
+  );
   fs.writeFileSync(path.join(dataDir, "state.json"), JSON.stringify(LEGACY, null, 2));
   store = await import("../src/store.ts");
   store.loadStore();
@@ -158,6 +177,33 @@ describe("v1 -> v2 migration", () => {
       assert.ok(fs.existsSync(log), `${run.id}/job.log moved`);
       assert.equal(fs.readFileSync(log, "utf8"), `log for ${run.id}\n`);
     }
+  });
+
+  test("absolute paths embedded in the ledger are repointed at data/jobs", () => {
+    const summary = store.getJob("0qi2g7")!.summary as Record<string, unknown>;
+    const newRoot = path.join(dataDir, "jobs");
+    assert.equal(summary.cleaned_msh_path, path.join(newRoot, "0qi2g7", "case_clean.msh"));
+    assert.equal(
+      (summary.files as Record<string, unknown>).mesh,
+      path.join(newRoot, "0qi2g7", "case.msh"),
+    );
+    assert.equal(summary.triangles, 7420, "non-path fields untouched");
+  });
+
+  test("absolute paths embedded in result.json / config.toml are repointed too", () => {
+    // Without this, a solve of a migrated mesh would fail its existence check
+    // on cleaned_msh_path and every pre-migration mesh would be unusable.
+    const newRoot = path.join(dataDir, "jobs");
+    const result = JSON.parse(
+      fs.readFileSync(path.join(newRoot, "0qi2g7", "result.json"), "utf8"),
+    ) as Record<string, string>;
+    assert.equal(result.cleaned_msh_path, path.join(newRoot, "0qi2g7", "case_clean.msh"));
+    assert.equal(result.stl_path, path.join(newRoot, "0qi2g7", "case.stl"));
+    assert.ok(!JSON.stringify(result).includes(path.join(dataDir, "runs")));
+
+    const toml = fs.readFileSync(path.join(newRoot, "b6j1li", "config.toml"), "utf8");
+    assert.ok(toml.includes(path.join(newRoot, "0qi2g7", "case_clean.msh")), toml);
+    assert.ok(!toml.includes(path.join(dataDir, "runs")));
   });
 
   test("migrating twice is a no-op", () => {

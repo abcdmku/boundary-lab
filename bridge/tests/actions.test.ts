@@ -300,6 +300,45 @@ describe("targets", () => {
     assert.equal(actions.fullState().targets.length, 2);
   });
 
+  test("a remote launch is refused when blabctl cannot forward it", () => {
+    // Probe sees an argparse banner without --server-url: the job would die on
+    // `error: unrecognized arguments`, so refuse it with a legible reason.
+    process.env.FAKE_NO_SERVER_URL = "1";
+    targets.resetServerUrlSupport();
+    try {
+      assert.equal(targets.blabctlSupportsServerUrl(), false);
+      const draft = actions.createDraft({
+        kind: "solve",
+        meshJobId: doneMesh(),
+        target: "http://box:8000",
+      });
+      assert.equal(draft.status, "draft", "staging a remote draft is still allowed");
+      const result = actions.launchJobs({ jobIds: [draft.id] });
+      assert.equal(result.launched.length, 0);
+      assert.match(result.skipped[0]!.reason, /does not support --server-url/);
+      assert.equal(store.getJob(draft.id)!.status, "draft");
+      assert.throws(
+        () => actions.startSolve({ meshJobId: doneMesh(), target: "http://box:8000" }),
+        /does not support --server-url/,
+      );
+    } finally {
+      delete process.env.FAKE_NO_SERVER_URL;
+      targets.resetServerUrlSupport();
+    }
+  });
+
+  test("a local launch never consults the remote capability probe", () => {
+    process.env.FAKE_NO_SERVER_URL = "1";
+    targets.resetServerUrlSupport();
+    try {
+      const draft = actions.createDraft({ kind: "solve", meshJobId: doneMesh() });
+      assert.equal(actions.launchJobs({ jobIds: [draft.id] }).launched.length, 1);
+    } finally {
+      delete process.env.FAKE_NO_SERVER_URL;
+      targets.resetServerUrlSupport();
+    }
+  });
+
   test("mesh jobs are always local, whatever target is asked for", () => {
     const draft = actions.createDraft({
       kind: "mesh",
