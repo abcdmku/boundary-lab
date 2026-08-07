@@ -246,6 +246,7 @@ BatchSummary = { batchId, batchName?, kinds: ("mesh"|"solve")[], createdAt,
 
 ### `POST /api/batches/:batchId/launch` → same as `/api/jobs/launch` with that batch.
 ### `POST /api/batches/:batchId/cancel` → same as `/api/jobs/cancel` with that batch.
+Both 404 on a batch id with no jobs.
 ### `DELETE /api/batches/:batchId`
 → `{ deleted: string[] }`. **409** if any job in the batch is queued or running.
 

@@ -245,6 +245,22 @@ describe("batches", () => {
     assert.equal(store.listJobs().length, before + 1, "only the mesh fixture was created");
   });
 
+  test("an unknown batch id is a 404, not a silent no-op", () => {
+    assert.throws(() => actions.launchJobs({ batchId: "b_nope" }), /unknown batch b_nope/);
+    assert.throws(() => actions.cancelJobs({ batchId: "b_nope" }), /unknown batch b_nope/);
+  });
+
+  test("settings embedded in params are honoured, not dropped", () => {
+    const draft = actions.createDraft({
+      kind: "solve",
+      meshJobId: doneMesh(),
+      params: { fmin: 300, count: 12 },
+      options: { count: 24 }, // explicit options win over params
+    });
+    assert.equal(draft.params.fmin, 300);
+    assert.equal(draft.params.count, 24);
+  });
+
   test("an unknown mesh aborts the whole sweep", () => {
     const before = store.listJobs().length;
     assert.throws(

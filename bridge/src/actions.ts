@@ -211,7 +211,12 @@ export function createDraft(input: DraftInput): store.Job {
     kind: "solve",
     status: "draft",
     name: input.name?.trim() || `solve ${mesh.name}`,
-    params: solveParams(meshJobId, input.options ?? readSolveOptions(input.params)),
+    // Settings may arrive as `options`, as flat keys, or embedded in `params`
+    // (the shape a UI round-tripping a job record would send). Merge, don't pick.
+    params: solveParams(meshJobId, {
+      ...readSolveOptions(input.params),
+      ...(input.options ?? {}),
+    }),
     target: target(input.target),
     parentJobId: meshJobId,
     ...(input.batchId ? { batchId: input.batchId } : {}),
@@ -467,7 +472,11 @@ function selectJobs(selector: JobSelector): store.Job[] {
   const out: store.Job[] = [];
   const seen = new Set<string>();
   if (selector.batchId) {
-    for (const job of store.listBatch(selector.batchId)) {
+    const batch = store.listBatch(selector.batchId);
+    // An empty batch is a typo, not "nothing to do" — say so instead of
+    // silently reporting a successful no-op.
+    if (batch.length === 0) throw new ActionError(`unknown batch ${selector.batchId}`, 404);
+    for (const job of batch) {
       if (seen.has(job.id)) continue;
       seen.add(job.id);
       out.push(job);
