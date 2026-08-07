@@ -302,6 +302,15 @@ your t3 thread and solve completions wake you up.
 `target` on any tool is the same union as the HTTP API: a string id/URL, or
 `{type, instanceId?, serverUrl?}`.
 
+## Solving on another machine
+
+`blabctl solve --backend server --server-url http://<host>:8765` sends the whole
+job (config + mesh, inlined) to a `blab server` elsewhere and streams results
+back, so a rented GPU box needs no shared filesystem. `blabctl remote-check
+--server-url ...` preflights one: reachability, which solver it runs, whether it
+accepts symmetry-reduced meshes, and its GPU/VRAM. `BLAB_SERVER_URL` and
+`BLAB_SERVER_TOKEN` supply defaults. See `docs/Boundary Lab Server.md`.
+
 ## Adding a generator
 
 Drop a module in `py/generators/` exposing `SCHEMA` (id/title/description + JSON-Schema
