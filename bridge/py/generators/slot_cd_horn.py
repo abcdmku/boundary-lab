@@ -7,13 +7,13 @@ Geometry (mm; fires +z; throat plane z=0; x = slot narrow axis, y = slot long ax
   slice_angle opening toward the throat: clip half-width
   w(z) = slot_width/2 + (z_e - z)*tan(slice_angle). The adapter depth is derived:
   z_e = (slot_length/2 - r_t) / tan(wall_angle).
-- Phase plug = sliced wedge: inner cone r_p(z) from plug_base_diameter/2 clipped
+- Phase plug = suspended sliced wedge: inner cone r_p(z) from plug_base_diameter/2 clipped
   by planes parallel to the slice planes inset plug_gap perpendicular, closing
   to a ridge over plug_tip_length and stopping plug_tip_margin short of the slot
-  exit. The plug base circle is fused with the driven annulus inner rim.
-- Driven surface (tag 2, "SD1D1001"): the annulus at z=0 between the plug base
-  and the driver exit (full disc when plug=false). Everything else is tag 1
-  "walls" (the plug is a rigid wall).
+  exit. Its capped base is suspended plug_base_clearance in front of the driver.
+- Driven surface (tag 2, "SD1D1001"): the full compression-driver exit disc at
+  z=0, with or without the plug. Everything else is tag 1 "walls" (the plug is
+  a separate closed rigid body).
 - CD flare: the slot outline morphs to a superellipse mouth over flare_depth
   (flare_exp=1 -> straight conical walls, true CD), with an optional mid-flare
   pinch waist and an ATH-Term-style mouth roundover (radius + sweep).
@@ -21,9 +21,10 @@ Geometry (mm; fires +z; throat plane z=0; x = slot narrow axis, y = slot long ax
   with a rolled mouth lip and a throat back ring. back="enclosure": box behind
   the mouth baffle (mouth_roundover is ignored in enclosure mode).
 
-Construction: direct structured section loft (numpy + meshio), not OCC booleans.
-Every surface is a closed-form family of quadrant outlines (slot_cd_sections)
-lofted into quad strips. Only the +x/+y quadrant is generated with nodes exactly
+Construction: direct feature-patch loft (numpy + meshio), not OCC booleans.
+Every surface is an analytic family of quadrant outlines (slot_cd_sections);
+variable-count strips keep sharp rails explicit as their patch arclength changes.
+Only the +x/+y quadrant is generated with nodes exactly
 on x=0/y=0; the blab mesh cleaner mirrors it into the full mesh (ATH pattern)
 and the unmirrored quadrant is written as reduced_msh_path for --symmetry x|xy.
 """
@@ -43,8 +44,8 @@ from generators import slot_cd_sections as sections
 DRIVEN_TAG = 2
 WALL_TAG = 1
 
-_ANNULUS_RADIAL_STRIPS = 2  # driven annulus strips when the plug is present
-_DISC_RADIAL_STRIPS = 3  # driven disc strips when plug=false (innermost collapses)
+_DISC_RADIAL_STRIPS = 3  # driven disc strips (innermost collapses)
+_PLUG_CAP_RADIAL_STRIPS = 2  # rigid cap below the suspended phase plug
 _BAFFLE_STRIPS = 2  # enclosure front baffle strips (mouth outline -> box outline)
 _ENCLOSURE_SIDE_SEGMENTS = 4  # enclosure side-wall strips
 _BACK_CAP_STRIPS = 3  # enclosure back-cap strips (last collapses to the axis)
@@ -54,17 +55,18 @@ SCHEMA = {
     "title": "Circular-to-Slot + CD Flare Horn",
     "description": (
         "Compression-driver horn: conical circular-to-slot adapter (two slice planes cut the cone into a "
-        "slot exit, with an optional sliced-wedge phase plug) feeding a constant-directivity flare that "
-        "morphs the slot into a superellipse mouth. Driven annulus at the throat plane is physical tag 2 "
+        "slot exit, with an optional suspended sliced-wedge phase plug) feeding a constant-directivity flare that "
+        "morphs the slot into a superellipse mouth. The full circular driver exit at the throat plane is physical tag 2 "
         "'SD1D1001'; walls are tag 1. Fires along +z, throat at z=0, x = slot narrow axis, y = slot long "
         "axis (vertical slot: mouth_width sets horizontal coverage). Mesh units are mm. Built as a direct "
-        "structured section loft in the +x/+y quadrant and mirrored, so solves can use --symmetry x or xy "
+        "feature-patch loft in the +x/+y quadrant and mirrored, so solves can use --symmetry x or xy "
         "via reduced_msh_path. Adapter depth is derived: z_e = (slot_length/2 - throat_diameter/2) / "
         "tan(wall_angle_deg). mouth_roundover is ignored when back='enclosure'. "
-        "OUTER BOUNDING BOX (mouth_width/mouth_height are the air aperture, the shell is larger): "
-        "margin = max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) per side, "
-        "c = 1 - cos(roundover_sweep_deg); bbox = [mouth_width + 2*margin, mouth_height + 2*margin, "
-        "z_e + flare_depth + mouth_roundover*max(sin(phi)) over the sampled roundover stations]. "
+        "OUTER BOUNDING BOX (mouth_width/mouth_height are the air aperture, the shell can be larger): "
+        "the x span is the larger of the mouth/lip and the circular-to-slot adapter bulge; mouth margin = "
+        "max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) per side, "
+        "c = 1 - cos(roundover_sweep_deg); height = mouth_height + 2*margin; depth = "
+        "z_e + flare_depth + mouth_roundover*max(sin(phi)) over the sampled roundover stations. "
         "`blabctl estimate --generator slot_cd_horn --params p.json` returns it exactly without meshing."
     ),
     "params": {
@@ -115,7 +117,17 @@ SCHEMA = {
                 "default": 18,
                 "minimum": 4,
                 "maximum": 60,
-                "description": "Plug base diameter at the throat plane in mm (must be < throat_diameter).",
+                "description": "Diameter of the capped phase-plug base in mm (must be < throat_diameter).",
+            },
+            "plug_base_clearance": {
+                "type": "number",
+                "default": 3,
+                "minimum": 0.5,
+                "maximum": 30,
+                "description": (
+                    "Axial air gap in mm from the circular compression-driver exit to the rigid phase-plug cap. "
+                    "Keeping the plug in front of the source preserves a full driven disc instead of an annulus."
+                ),
             },
             "plug_angle_deg": {
                 "type": "number",
@@ -152,7 +164,8 @@ SCHEMA = {
                 "maximum": 1000,
                 "description": (
                     "Mouth width in mm (x, horizontal coverage plane) — the AIR aperture, NOT the outer "
-                    "envelope. The shell adds a margin on every side: outer_width = mouth_width + 2*margin, "
+                    "envelope. At the mouth the shell adds a margin on every side: mouth/lip width = "
+                    "mouth_width + 2*margin, but the adapter bulge can set a larger total outer width. "
                     "margin = max(mouth_roundover*c, wall_thickness + (mouth_roundover - wall_thickness)*c) "
                     "with c = 1 - cos(roundover_sweep_deg) (margin = wall_thickness when mouth_roundover is "
                     "0, = enclosure_margin when back='enclosure'). Budget for it against any size limit. "
@@ -185,10 +198,10 @@ SCHEMA = {
             },
             "mouth_superellipse_n": {
                 "type": "number",
-                "default": 4,
+                "default": 8,
                 "minimum": 2,
                 "maximum": 12,
-                "description": "Mouth superellipse exponent (2 = ellipse, higher = squarer corners).",
+                "description": "Mouth superellipse exponent (2 = ellipse, 8 = the squarer default, higher = tighter corners).",
             },
             "flare_exp": {
                 "type": "number",
@@ -288,10 +301,10 @@ SCHEMA = {
             },
             "plug_segments": {
                 "type": "integer",
-                "default": 10,
+                "default": 16,
                 "minimum": 4,
                 "maximum": 40,
-                "description": "Axial strips along the phase plug.",
+                "description": "Axial strips along the phase plug (16 by default to keep the taper and feature rail smooth).",
             },
             "roundover_segments": {
                 "type": "integer",
@@ -331,6 +344,7 @@ def _derive(p: dict) -> dict:
         "enclosure_depth",
         "enclosure_margin",
         "plug_base_diameter",
+        "plug_base_clearance",
         "plug_gap",
         "plug_tip_margin",
         "plug_tip_length",
@@ -386,6 +400,12 @@ def _derive(p: dict) -> dict:
             f"slice planes cut into the throat rim: clip half-width at z=0 is {d['w_throat']:.2f} mm "
             f"< throat radius {d['r_t']:.2f} mm. Increase slot_width or slice_angle_deg, or reduce throat_diameter."
         )
+    # x(z) is the lesser of the expanding cone radius and the inward-moving
+    # slice plane. Its maximum is their intersection, which can be much wider
+    # than both the throat and a narrow slot/mouth.
+    d["z_adapter_peak"] = (d["w_throat"] - d["r_t"]) / (d["tan_wall"] + d["tan_slice"])
+    d["r_adapter_peak"] = d["r_t"] + d["z_adapter_peak"] * d["tan_wall"]
+    d["n_pts"] = int(p["angular_segments"]) // 4 + 1
     if float(p["mouth_width"]) < float(p["slot_width"]):
         raise ValueError("mouth_width must be at least slot_width: the CD flare cannot contract.")
     if float(p["mouth_height"]) < float(p["slot_length"]):
@@ -403,6 +423,22 @@ def _derive(p: dict) -> dict:
             "mouth outline does not contain the slot outline: the CD flare would contract locally near the "
             "slot corners. Increase mouth_width, mouth_height, or mouth_superellipse_n."
         )
+    # The actual flare loft connects equal-index boundary vertices. Analytic
+    # containment alone does not guarantee that two independently arclength-
+    # sampled outlines have a non-contracting point correspondence (extreme
+    # tall/narrow mouths can otherwise pull a few rails inward in x).
+    slot_mesh = sections.clipped_circle_quadrant(half_slot_len, d["w_slot"], d["n_pts"])
+    mouth_mesh = sections.superellipse_quadrant(
+        float(p["mouth_width"]) / 2.0,
+        float(p["mouth_height"]) / 2.0,
+        exponent,
+        d["n_pts"],
+    )
+    if np.any(mouth_mesh + 1e-9 < slot_mesh):
+        raise ValueError(
+            "mouth-to-slot mesh correspondence would contract the flare locally. Increase mouth_width, "
+            "mouth_height, or mouth_superellipse_n."
+        )
     d["z_m"] = d["z_e"] + float(p["flare_depth"])
 
     roundover = float(p["mouth_roundover"])
@@ -412,46 +448,66 @@ def _derive(p: dict) -> dict:
             f"mouth_roundover ({roundover:g} mm) must be 0 or greater than wall_thickness ({thickness:g} mm) "
             "for back='shell': the rolled mouth lip needs a positive outer radius."
         )
+    if back == "enclosure":
+        box_half_width = float(p["mouth_width"]) / 2.0 + float(p["enclosure_margin"])
+        if box_half_width <= d["r_adapter_peak"]:
+            raise ValueError(
+                "enclosure is narrower than the circular-to-slot adapter bulge and would intersect it: "
+                f"box half-width {box_half_width:.2f} mm <= adapter half-width {d['r_adapter_peak']:.2f} mm. "
+                "Increase mouth_width or enclosure_margin."
+            )
 
     if bool(p["plug"]):
         r_pb = float(p["plug_base_diameter"]) / 2.0
         if r_pb >= d["r_t"]:
             raise ValueError(
-                "plug_base_diameter must be smaller than throat_diameter so the driven annulus has positive width."
+                "plug_base_diameter must be smaller than throat_diameter so the suspended plug fits over the source."
             )
+        z_base = float(p["plug_base_clearance"])
         z_tip = d["z_e"] - float(p["plug_tip_margin"])
         if z_tip <= 0.0:
             raise ValueError(
                 f"plug_tip_margin leaves no room for the phase plug (adapter depth z_e = {d['z_e']:.1f} mm)."
             )
-        if float(p["plug_tip_length"]) > z_tip:
+        if z_tip <= z_base:
             raise ValueError(
-                f"plug_tip_length ({p['plug_tip_length']:g} mm) exceeds the plug depth ({z_tip:.1f} mm); "
-                "reduce plug_tip_length or plug_tip_margin."
+                "plug_base_clearance and plug_tip_margin leave no room for the phase plug "
+                f"(base z = {z_base:.1f} mm, tip z = {z_tip:.1f} mm)."
             )
-        w_p0 = d["w_throat"] - float(p["plug_gap"]) / math.cos(slice_rad)
-        w_p_tip = w_p0 - z_tip * d["tan_slice"]
+        plug_length = z_tip - z_base
+        if float(p["plug_tip_length"]) > plug_length:
+            raise ValueError(
+                f"plug_tip_length ({p['plug_tip_length']:g} mm) exceeds the plug length ({plug_length:.1f} mm); "
+                "reduce plug_tip_length, plug_base_clearance, or plug_tip_margin."
+            )
+        w_p_base = (
+            d["w_throat"] - z_base * d["tan_slice"] - float(p["plug_gap"]) / math.cos(slice_rad)
+        )
+        w_p_tip = (
+            d["w_throat"] - z_tip * d["tan_slice"] - float(p["plug_gap"]) / math.cos(slice_rad)
+        )
         if w_p_tip <= 0.0:
             raise ValueError(
                 "plug_gap seals the plug channels: the inset slice planes cross before the plug tip. "
                 "Reduce plug_gap or plug_tip_margin."
             )
-        if w_p0 < r_pb:
+        if w_p_base < r_pb:
             raise ValueError("the inset slice planes cut the plug base circle; reduce plug_gap or plug_base_diameter.")
         tan_plug = math.tan(math.radians(float(p["plug_angle_deg"])))
-        gap_y_tip = (d["r_t"] - r_pb) + z_tip * (d["tan_wall"] - tan_plug)
-        if min(d["r_t"] - r_pb, gap_y_tip) < 0.5:
+        gap_y_base = d["r_t"] + z_base * d["tan_wall"] - r_pb
+        gap_y_tip = d["r_t"] + z_tip * d["tan_wall"] - (r_pb + plug_length * tan_plug)
+        if min(gap_y_base, gap_y_tip) < 0.5:
             raise ValueError(
                 "phase plug seals against the outer cone wall along y "
-                f"(clearance {min(d['r_t'] - r_pb, gap_y_tip):.2f} mm < 0.5 mm); "
+                f"(clearance {min(gap_y_base, gap_y_tip):.2f} mm < 0.5 mm); "
                 "reduce plug_angle_deg or plug_base_diameter."
             )
         d["r_pb"] = r_pb
+        d["z_base"] = z_base
         d["z_tip"] = z_tip
-        d["w_p0"] = w_p0
+        d["w_p_base"] = w_p_base
         d["tan_plug"] = tan_plug
 
-    d["n_pts"] = int(p["angular_segments"]) // 4 + 1
     d["depth_eff"] = max(float(p["enclosure_depth"]), d["z_m"] + 15.0)
     return d
 
@@ -464,9 +520,35 @@ def _outer_skin_indices(inner_station_count: int, coarsen: int) -> list[int]:
     return idx
 
 
+def _cosine_stations_with_feature(start: float, end: float, feature: float, segments: int) -> np.ndarray:
+    """Cosine stations with an exact interior feature while preserving the requested strip count."""
+    if feature <= start + 1e-12 or feature >= end - 1e-12 or segments < 2:
+        return sections.cosine_stations(start, end, segments)
+    left = int(np.floor(segments * (feature - start) / (end - start) + 0.5))
+    left = min(max(left, 1), segments - 1)
+    right = segments - left
+    return np.concatenate(
+        (
+            sections.cosine_stations(start, feature, left),
+            sections.cosine_stations(feature, end, right)[1:],
+        )
+    )
+
+
+def _with_required_indices(indices: list[int], required: tuple[int, ...]) -> list[int]:
+    """Insert required stations into a descending outer-skin index list."""
+    return sorted(set(indices).union(required), reverse=True)
+
+
+def _combine_patches(chord: np.ndarray, arc: np.ndarray) -> np.ndarray:
+    """Join feature patches without duplicating their shared corner."""
+    return np.vstack((chord[:-1], arc))
+
+
 def _quadrant_chains(p: dict, d: dict) -> list[tuple[list[np.ndarray], bool, int]]:
-    """Assemble the station chains. Returns [(stations, flip, driven_strip_count), ...]."""
+    """Assemble independent surface-patch chains as ``(stations, flip, physical_tag)``."""
     n = d["n_pts"]
+    n_segments = n - 1
     r_t, z_e, z_m = d["r_t"], d["z_e"], d["z_m"]
     plug = bool(p["plug"])
     back = str(p["back"])
@@ -475,29 +557,46 @@ def _quadrant_chains(p: dict, d: dict) -> list[tuple[list[np.ndarray], bool, int
     z_hat = np.array([0.0, 0.0, 1.0])
 
     def arc(radius: float) -> np.ndarray:
-        if radius <= 0.0:
-            return np.zeros((n, 2))
         return sections.clipped_circle_quadrant(radius, radius, n)
 
-    def adapter_outline(z: float) -> np.ndarray:
+    def adapter_patches(z: float, offset: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
         radius = r_t + z * d["tan_wall"]
         clip = d["w_slot"] + (z_e - z) * d["tan_slice"]
-        return sections.clipped_circle_quadrant(radius, clip, n)
+        return sections.clipped_circle_quadrant_patches(radius + offset, clip + offset, n_segments)
 
-    # Driven surface stations at z=0 (annulus around the plug base, or full disc).
-    if plug:
-        radii = np.linspace(d["r_pb"], r_t, _ANNULUS_RADIAL_STRIPS + 1)
-    else:
-        radii = np.linspace(0.0, r_t, _DISC_RADIAL_STRIPS + 1)
-    annulus_stations = [sections.as_station(arc(r), 0.0) for r in radii]
-    driven_strips = len(annulus_stations) - 1
+    # The compression-driver boundary is always the complete circular exit.
+    source_stations = [np.array([[0.0, 0.0, 0.0]])]
+    for radius in np.linspace(0.0, r_t, _DISC_RADIAL_STRIPS + 1)[1:]:
+        source_stations.append(sections.as_station(arc(radius), 0.0))
+    chains: list[tuple[list[np.ndarray], bool, int]] = [(source_stations, True, DRIVEN_TAG)]
 
-    # Inner wall outlines: adapter (clipped circles) then CD flare (slot -> mouth blend).
-    z_adapter = sections.cosine_stations(0.0, z_e, int(p["adapter_segments"]))
+    # The adapter's cone/slice intersection is an explicit mesh rail. Chord and
+    # arc point counts adapt by arclength, while the variable-count loft keeps
+    # that rail continuous instead of letting it zigzag between vertex indices.
+    z_adapter = _cosine_stations_with_feature(
+        0.0,
+        z_e,
+        d["z_adapter_peak"],
+        int(p["adapter_segments"]),
+    )
+    adapter_chords: list[np.ndarray] = []
+    adapter_arcs: list[np.ndarray] = []
+    adapter_outlines: list[np.ndarray] = []
+    for z in z_adapter:
+        chord, curved = adapter_patches(float(z))
+        adapter_chords.append(sections.as_station(chord, float(z)))
+        adapter_arcs.append(sections.as_station(curved, float(z)))
+        adapter_outlines.append(_combine_patches(chord, curved))
+    chains.extend(
+        (
+            (adapter_chords, True, WALL_TAG),
+            (adapter_arcs, True, WALL_TAG),
+        )
+    )
+
+    # CD flare: the exact feature-preserving slot outline morphs into the mouth.
     z_flare = sections.cosine_stations(z_e, z_m, int(p["flare_segments"]))
-    inner_z = np.concatenate((z_adapter, z_flare[1:]))
-    outlines = [adapter_outline(z) for z in z_adapter]
-    slot_outline = outlines[-1]
+    slot_outline = adapter_outlines[-1]
     mouth_outline = sections.superellipse_quadrant(
         float(p["mouth_width"]) / 2.0,
         float(p["mouth_height"]) / 2.0,
@@ -505,33 +604,76 @@ def _quadrant_chains(p: dict, d: dict) -> list[tuple[list[np.ndarray], bool, int
         n,
     )
     flare_depth = float(p["flare_depth"])
-    for z in z_flare[1:]:
+    flare_outlines = [slot_outline]
+    for station_index, z in enumerate(z_flare[1:], start=1):
+        if station_index == len(z_flare) - 1:
+            # Preserve the analytic mouth bit-for-bit.  Recomputing ``u`` from
+            # two independently rounded z values can land one ulp below 1.0;
+            # that tiny blend error gives the outer flare a slightly different
+            # normal than the rolled lip and leaves an unfused mouth seam.
+            flare_outlines.append(mouth_outline.copy())
+            continue
         u = (z - z_e) / flare_depth
         blend = sections.blend_outlines(slot_outline, mouth_outline, u ** float(p["flare_exp"]))
-        outlines.append(blend * sections.pinch_scale(u, float(p["pinch"]), float(p["pinch_pos"])))
-
-    main = list(annulus_stations)
-    inner_stations = [sections.as_station(outlines[i], inner_z[i]) for i in range(len(inner_z))]
-    main.extend(inner_stations[1:])  # inner_stations[0] is bitwise-equal to annulus_stations[-1]
+        flare_outlines.append(blend * sections.pinch_scale(u, float(p["pinch"]), float(p["pinch_pos"])))
+    flare_stations = [sections.as_station(outline, float(z)) for outline, z in zip(flare_outlines, z_flare)]
+    chains.append((flare_stations, True, WALL_TAG))
 
     if back == "shell":
-        rim = inner_stations[-1]
+        rim = flare_stations[-1]
         normals3 = np.column_stack((sections.outline_normals(mouth_outline), np.zeros(n)))
-        skin_idx = _outer_skin_indices(len(inner_z), int(p["outer_coarsen"]))
+        lip = [rim]
         if roundover > 0.0:
             sweep = math.radians(float(p["roundover_sweep_deg"]))
             phis = np.linspace(0.0, sweep, int(p["roundover_segments"]) + 1)
             for phi in phis[1:]:  # inner roundover arc
-                main.append(rim + roundover * ((1.0 - math.cos(phi)) * normals3 + math.sin(phi) * z_hat))
+                lip.append(rim + roundover * ((1.0 - math.cos(phi)) * normals3 + math.sin(phi) * z_hat))
             outer_r = roundover - thickness
             for phi in phis[::-1]:  # lip end cap, then outer roundover arc back to the mouth plane
-                main.append(
+                lip.append(
                     rim + thickness * normals3 + outer_r * ((1.0 - math.cos(phi)) * normals3 + math.sin(phi) * z_hat)
                 )
-            skin_idx = skin_idx[1:]  # the mouth-plane offset station is the arc's phi=0 station
-        for i in skin_idx:  # outer skin back down to the throat plane
-            main.append(sections.as_station(sections.offset_outline(outlines[i], thickness), inner_z[i]))
-        main.append(inner_stations[0])  # throat back ring closes onto the throat rim circle
+        else:
+            lip.append(sections.as_station(sections.offset_outline(mouth_outline, thickness), z_m))
+        chains.append((lip, True, WALL_TAG))
+
+        # Outer flare, back from the mouth to an analytic offset of the slot.
+        slot_outer_chord, slot_outer_arc = adapter_patches(z_e, thickness)
+        slot_outer = _combine_patches(slot_outer_chord, slot_outer_arc)
+        outer_flare_outlines = [slot_outer]
+        outer_flare_outlines.extend(
+            sections.offset_outline(outline, thickness) for outline in flare_outlines[1:]
+        )
+        flare_skin_idx = _outer_skin_indices(len(z_flare), int(p["outer_coarsen"]))
+        outer_flare = [
+            sections.as_station(outer_flare_outlines[i], float(z_flare[i])) for i in flare_skin_idx
+        ]
+        chains.append((outer_flare, True, WALL_TAG))
+
+        # Analytic offset adapter patches preserve the same sharp rail outside.
+        adapter_skin_idx = _outer_skin_indices(len(z_adapter), int(p["outer_coarsen"]))
+        peak_index = int(np.argmin(np.abs(z_adapter - d["z_adapter_peak"])))
+        adapter_skin_idx = _with_required_indices(adapter_skin_idx, (peak_index,))
+        outer_adapter_chords: list[np.ndarray] = []
+        outer_adapter_arcs: list[np.ndarray] = []
+        for i in adapter_skin_idx:
+            chord, curved = adapter_patches(float(z_adapter[i]), thickness)
+            outer_adapter_chords.append(sections.as_station(chord, float(z_adapter[i])))
+            outer_adapter_arcs.append(sections.as_station(curved, float(z_adapter[i])))
+        chains.extend(
+            (
+                (outer_adapter_chords, True, WALL_TAG),
+                (outer_adapter_arcs, True, WALL_TAG),
+            )
+        )
+
+        # Rigid material behind the throat; it intentionally meets the source
+        # and inner wall on the existing throat T-ring used by shell generators.
+        back_ring = [
+            sections.as_station(arc(r_t + thickness), 0.0),
+            sections.as_station(arc(r_t), 0.0),
+        ]
+        chains.append((back_ring, True, WALL_TAG))
     else:  # enclosure
         box_outline = sections.superellipse_quadrant(
             float(p["mouth_width"]) / 2.0 + float(p["enclosure_margin"]),
@@ -539,31 +681,54 @@ def _quadrant_chains(p: dict, d: dict) -> list[tuple[list[np.ndarray], bool, int
             float(p["mouth_superellipse_n"]),
             n,
         )
+        rim = flare_stations[-1]
+        enclosure = [rim]
         for k in range(1, _BAFFLE_STRIPS + 1):  # front baffle
             frac = k / _BAFFLE_STRIPS
-            main.append(sections.as_station(sections.blend_outlines(mouth_outline, box_outline, frac), z_m))
+            enclosure.append(sections.as_station(sections.blend_outlines(mouth_outline, box_outline, frac), z_m))
         z_back = z_m - d["depth_eff"]
         for z in np.linspace(z_m, z_back, _ENCLOSURE_SIDE_SEGMENTS + 1)[1:]:  # side walls
-            main.append(sections.as_station(box_outline, z))
+            enclosure.append(sections.as_station(box_outline, z))
         for k in range(1, _BACK_CAP_STRIPS + 1):  # back cap collapsing to the axis
             scale = 1.0 - k / _BACK_CAP_STRIPS
-            main.append(sections.as_station(box_outline * scale, z_back))
-
-    chains = [(main, True, driven_strips)]
+            if scale <= 0.0:
+                enclosure.append(np.array([[0.0, 0.0, z_back]]))
+            else:
+                enclosure.append(sections.as_station(box_outline * scale, z_back))
+        chains.append((enclosure, True, WALL_TAG))
 
     if plug:
-        z_plug = sections.cosine_stations(0.0, d["z_tip"], int(p["plug_segments"]))
+        z_base = d["z_base"]
         z_taper = d["z_tip"] - float(p["plug_tip_length"])
+        z_plug = _cosine_stations_with_feature(
+            z_base,
+            d["z_tip"],
+            z_taper,
+            int(p["plug_segments"]),
+        )
         taper_span = d["z_tip"] - z_taper
-        plug_stations = [annulus_stations[0]]  # base circle fused with the annulus inner rim
-        for z in z_plug[1:]:
-            r_pz = d["r_pb"] + z * d["tan_plug"]
-            w_pz = d["w_p0"] - z * d["tan_slice"]
+        plug_cap = [np.array([[0.0, 0.0, z_base]])]
+        for radius in np.linspace(0.0, d["r_pb"], _PLUG_CAP_RADIAL_STRIPS + 1)[1:]:
+            plug_cap.append(sections.as_station(arc(float(radius)), z_base))
+        chains.append((plug_cap, False, WALL_TAG))
+
+        plug_chords: list[np.ndarray] = []
+        plug_arcs: list[np.ndarray] = []
+        for z in z_plug:
+            r_pz = d["r_pb"] + (z - z_base) * d["tan_plug"]
+            w_pz = d["w_p_base"] - (z - z_base) * d["tan_slice"]
             s = min(max((z - z_taper) / taper_span, 0.0), 1.0)
             taper = math.sqrt(max(0.0, 1.0 - s * s))
             clip = min(r_pz, w_pz) * taper
-            plug_stations.append(sections.as_station(sections.clipped_circle_quadrant(r_pz, clip, n), z))
-        chains.append((plug_stations, False, 0))
+            chord, curved = sections.clipped_circle_quadrant_patches(r_pz, clip, n_segments)
+            plug_chords.append(sections.as_station(chord, float(z)))
+            plug_arcs.append(sections.as_station(curved, float(z)))
+        chains.extend(
+            (
+                (plug_chords, False, WALL_TAG),
+                (plug_arcs, False, WALL_TAG),
+            )
+        )
 
     return chains
 
@@ -576,11 +741,11 @@ def build_quadrant(params: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     all_triangles: list[np.ndarray] = []
     all_tags: list[np.ndarray] = []
     offset = 0
-    for stations, flip, driven_strips in _quadrant_chains(p, d):
-        points, triangles, strips = sections.loft_chain(stations, flip=flip)
+    for stations, flip, physical_tag in _quadrant_chains(p, d):
+        points, triangles, _strips = sections.loft_chain(stations, flip=flip)
         all_points.append(points)
         all_triangles.append(triangles + offset)
-        all_tags.append(np.where(strips < driven_strips, DRIVEN_TAG, WALL_TAG))
+        all_tags.append(np.full(len(triangles), physical_tag, dtype=np.int32))
         offset += len(points)
     return (
         np.vstack(all_points),
@@ -590,28 +755,13 @@ def build_quadrant(params: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def estimate_triangles(params: dict) -> int:
-    """Closed-form full-mesh triangle count (exactly matches build_quadrant + x/y mirroring)."""
+    """Exact topology-only full-mesh count (no mirroring, mesh files, or gmsh work)."""
     p = _with_defaults(params)
     d = _derive(p)
-    n_seg = d["n_pts"] - 1
-    plug = bool(p["plug"])
-    inner_count = int(p["adapter_segments"]) + int(p["flare_segments"]) + 1
-
-    stations = (_ANNULUS_RADIAL_STRIPS + 1 if plug else _DISC_RADIAL_STRIPS + 1) + (inner_count - 1)
-    collapsed_strips = 0 if plug else 1
-    if str(p["back"]) == "shell":
-        skin = len(_outer_skin_indices(inner_count, int(p["outer_coarsen"])))
-        if float(p["mouth_roundover"]) > 0.0:
-            stations += 2 * int(p["roundover_segments"]) + skin  # arcs + cap share the mouth-plane station
-        else:
-            stations += skin
-        stations += 1  # throat back ring
-    else:
-        stations += _BAFFLE_STRIPS + _ENCLOSURE_SIDE_SEGMENTS + _BACK_CAP_STRIPS
-        collapsed_strips += 1
-    quadrant = 2 * n_seg * (stations - 1) - n_seg * collapsed_strips
-    if plug:
-        quadrant += 2 * n_seg * int(p["plug_segments"])
+    quadrant = 0
+    for stations, flip, _physical_tag in _quadrant_chains(p, d):
+        _points, triangles, _strips = sections.loft_chain(stations, flip=flip)
+        quadrant += len(triangles)
     return 4 * quadrant
 
 
@@ -674,7 +824,7 @@ def estimate_bbox_mm(params: dict) -> list[float]:
     the same as ``build_quadrant``: impossible parameter combinations raise here
     too.
 
-        x = mouth_width  + 2 * margin        (see mouth_to_outer_margin_mm)
+        x = 2 * max(mouth_width/2 + margin, adapter_peak + shell_offset)
         y = mouth_height + 2 * margin
         z = z_e + flare_depth + lip_depth    (see mouth_lip_depth_mm)
 
@@ -685,7 +835,11 @@ def estimate_bbox_mm(params: dict) -> list[float]:
     p = _with_defaults(params)
     d = _derive(p)
     margin = mouth_to_outer_margin_mm(p)
-    width = float(p["mouth_width"]) + 2.0 * margin
+    mouth_half_width = float(p["mouth_width"]) / 2.0 + margin
+    adapter_half_width = d["r_adapter_peak"]
+    if str(p["back"]) == "shell":
+        adapter_half_width += float(p["wall_thickness"])
+    width = 2.0 * max(mouth_half_width, adapter_half_width)
     height = float(p["mouth_height"]) + 2.0 * margin
     if str(p["back"]) != "shell":
         return [width, height, float(d["depth_eff"])]
@@ -707,7 +861,7 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
             "event": "progress",
             "stage": "sections",
             "message": (
-                f"Assembling section loft (closed-form estimate: {estimate} triangles after mirroring, "
+                f"Assembling section loft (exact topology estimate: {estimate} triangles after mirroring, "
                 f"outer bbox {bbox_estimate[0]:.1f}x{bbox_estimate[1]:.1f}x{bbox_estimate[2]:.1f} mm)"
             ),
         }
