@@ -4,7 +4,7 @@ import { cn } from "../../lib/cn";
 // Row actions stay invisible until the row is hovered (or focused, for
 // keyboard users). Ghost styling throughout — red appears only once the
 // delete is armed ("Confirm delete").
-export function JobActions({ job, api, refetch, notify, onConfigure, onSolve }) {
+export function JobActions({ job, api, refetch, notify, onSolve }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const timerRef = useRef(null);
@@ -27,11 +27,15 @@ export function JobActions({ job, api, refetch, notify, onConfigure, onSolve }) 
     refetch();
   });
 
-  // A draft is configured but not started — this is the only thing that
-  // enqueues it. `launchJobs` reports refusals in `skipped` rather than
-  // throwing, so an unlaunchable draft must be surfaced explicitly.
-  const launch = run(async () => {
-    const res = await api(`/api/jobs/${job.id}/launch`, { method: "POST" });
+  // Queued work can be put back on the shelf without destroying its config.
+  // This is the non-destructive correction when it was launched too early or
+  // aimed at the wrong machine.
+  const hold = run(async () => {
+    const res = await api("/api/jobs/hold", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobIds: [job.id] }),
+    });
     refetch();
     const skipped = res?.skipped?.[0];
     if (skipped) notify?.(skipped.reason);
@@ -80,22 +84,16 @@ export function JobActions({ job, api, refetch, notify, onConfigure, onSolve }) 
           Solve…
         </button>
       )}
-      {job.status === "draft" && (
-        <>
-          <button
-            type="button"
-            className="job-action-btn"
-            onClick={(e) => {
-              e.stopPropagation();
-              onConfigure?.(job);
-            }}
-          >
-            Configure
-          </button>
-          <button type="button" className="job-action-btn" onClick={launch} disabled={busy}>
-            Launch
-          </button>
-        </>
+      {job.status === "queued" && (
+        <button
+          type="button"
+          className="job-action-btn"
+          onClick={hold}
+          disabled={busy}
+          title="Return this queued job to Planned without losing its configuration"
+        >
+          Hold
+        </button>
       )}
       {(job.status === "running" || job.status === "queued") && (
         <button type="button" className="job-action-btn" onClick={cancel} disabled={busy}>

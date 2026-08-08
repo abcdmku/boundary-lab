@@ -1,0 +1,381 @@
+/* Designs view. Plain CSS on the shared tokens (see jobs.css for why). */
+
+.designs {
+  flex: 1 1 0%;
+  min-width: 0;
+  max-width: 1100px;
+  padding: 16px 24px 48px;
+}
+
+.designs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.designs-filters {
+  margin-left: auto;
+}
+.designs-search {
+  max-width: 220px;
+}
+/* Solves whose mesh is gone have no tile, so their bucket lays out as a row
+   of chips rather than a column of tiles. */
+.design-body--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.design-new {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.design-new .input {
+  max-width: 280px;
+}
+
+/* ---- one design ---- */
+.design {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  overflow: hidden;
+}
+.design--loose {
+  border-style: dashed;
+  background: transparent;
+}
+.design-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.design--archived {
+  opacity: 0.72;
+}
+.design--archived .design-name::after {
+  content: "  archived";
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.design-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+.design-caret {
+  flex: none;
+  color: var(--muted-foreground);
+  transition: transform 0.15s;
+}
+.design-caret--open {
+  transform: rotate(90deg);
+}
+.design-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-meta {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.design-best {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success-foreground);
+}
+.design-actions,
+.design-file {
+  margin-left: auto;
+}
+.design-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.design-file {
+  height: 24px;
+  font-size: 11px;
+  max-width: 150px;
+}
+.design-goal {
+  margin: 0;
+  padding: 6px 10px 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.design-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+.design-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* ---- a mesh and its solves ---- */
+.mt {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+}
+/* A variant is the same tile, indented and quieter — the eye should land on
+   the lineage root first and read the edits downward. */
+.mt--variant {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+}
+.mt-branch {
+  position: absolute;
+  left: -13px;
+  top: 14px;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+}
+
+.mt-shot {
+  flex: none;
+  width: 84px;
+  height: 63px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background-color: var(--muted);
+  background-size: cover;
+  background-position: center;
+  cursor: pointer;
+  overflow: hidden;
+}
+.mt-shot:hover {
+  border-color: var(--primary);
+}
+.mt-shot:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.mt-shot-blank {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.mt-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-right: 22px;
+}
+
+@media (max-width: 900px) {
+  .app-body {
+    flex-direction: column;
+  }
+  .app-body > .generator-rail {
+    position: static;
+    width: 100%;
+    height: auto;
+    max-height: 220px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .designs {
+    width: 100%;
+    max-width: none;
+    padding: 12px 14px 40px;
+  }
+  .designs-head {
+    flex-wrap: wrap;
+  }
+  .designs-filters {
+    margin-left: 0;
+  }
+  .designs-search {
+    flex: 1 1 180px;
+    max-width: none;
+  }
+}
+
+@media (max-width: 540px) {
+  .topbar {
+    gap: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .topbar-title,
+  .topbar-summary {
+    display: none;
+  }
+  .topbar-status {
+    min-width: 0;
+  }
+  .designs-head .board-count {
+    margin-right: auto;
+  }
+  .designs-filters {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+  }
+  .designs-search {
+    order: 4;
+  }
+  .mt {
+    gap: 8px;
+  }
+  .mt-shot {
+    width: 72px;
+    height: 54px;
+  }
+}
+.mt-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.mt-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mt-name:hover {
+  color: var(--primary);
+}
+.mt-tris {
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+.mt-score {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--success-foreground);
+}
+
+.mt-delta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.mt-chip {
+  display: inline-flex;
+  gap: 3px;
+  padding: 0 5px;
+  height: 16px;
+  align-items: center;
+  border-radius: 4px;
+  background: var(--accent);
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+.mt-chip b {
+  color: var(--foreground);
+  font-weight: 600;
+}
+.mt-chip--more {
+  opacity: 0.7;
+}
+
+/* ---- solve chips: the many side of one-mesh-many-solves ---- */
+.mt-solves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sv {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+.sv:hover:not(:disabled) {
+  color: var(--foreground);
+  border-color: color-mix(in srgb, var(--foreground) 25%, var(--border));
+}
+.sv:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.sv b {
+  color: var(--success-foreground);
+  font-weight: 600;
+}
+.sv--running {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  color: var(--foreground);
+}
+.sv--failed {
+  border-color: color-mix(in srgb, var(--destructive) 45%, var(--border));
+}
+.sv--add {
+  border-style: dashed;
+}
+.sv--add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mt-active {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}

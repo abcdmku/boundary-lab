@@ -18,6 +18,37 @@ npm test          # model / draft / batch / lane-concurrency tests
 Dashboard: http://127.0.0.1:4821 — MCP: `POST http://127.0.0.1:4821/mcp`
 (already wired into the repo's `.mcp.json`).
 
+## The dashboard
+
+Two views over one state, plus one dialog for a job itself:
+
+- **Designs** — what is being built, and the ledger of every job. Projects → mesh
+  lineage → the solves of each mesh. A variant tile names only the parameters that
+  differ from its lineage root; the solves of a mesh are chips inside its tile, because
+  that is where they belong. Search matches meshes *and* their solves; the status chips
+  narrow to active / planned / failed work. Clicking any tile or chip opens the job.
+- **Job dialog** — one job in full: config, geometry, plots, log, and its actions
+  (launch, cancel, rescan, delete). Opened from a mesh tile, a solve chip, or a card on
+  the schedule board.
+- **Schedule** — *when, where and in what order* it runs, and **the machines themselves**.
+  One column per target, a **Planned** backlog on the left, cards you drag between them.
+  Dropping a card on a machine runs it there; dropping it back on the backlog holds it
+  as a draft with its configuration intact. Alt + arrow keys do the same from the
+  keyboard. Column headers carry slot pips (where supported, click pip *n* to allow *n*
+  concurrent jobs),
+  a forecast bar showing the shape of the queue, the time the machine expects to be
+  free, and — for an unusable target — why. The **+ Machine** column at the end opens
+  the rental dialog.
+There is deliberately no flat "jobs" list and no separate "compute" view. Both were
+second renderings of records these two views already show — the jobs board relisted every
+mesh and solve that Designs groups properly, and the compute view relisted the machines
+that *are* the schedule's columns. Two places showing one truth is one too many. What each
+uniquely owned survived: the job detail panel became the **job dialog**, and renting a GPU
+became the **Machines** dialog, reached from the board's + Machine column or the burn pill.
+
+The one thing with no new home is multi-select **bulk delete** of finished jobs. Launch,
+hold and reorder in bulk are the schedule board; per-job delete is in the job dialog.
+
 ## Configuration (env)
 
 | Var | Default | |
@@ -87,7 +118,8 @@ are baked in at create time and are not added to existing instances.
 
 ## Layout
 
-- `src/` — server: config, store, targets, queue (per-target lanes), MCP tools, t3 client
+- `src/` — server: config, store (projects + job ledger), targets (slots/devices), queue
+  (per-target lanes), estimate (durations and lane forecasts), MCP tools, t3 client
 - `src/vast/` — vast.ai compute provider: client, instance registry, SSH provisioning, `/api/vast` routes
 - `py/` — Python glue: `blabctl.py` (NDJSON CLI) + `generators/` (ATH waveguide, procedural axisymmetric horn)
 - `provision/` — `vast_bootstrap.sh`, the idempotent remote installer
@@ -97,7 +129,32 @@ are baked in at create time and are not added to existing instances.
 
 ---
 
-# The job model
+# The model
+
+```
+project ──┬── mesh (root)          the geometry family being explored
+          │     ├── mesh variant   same design, different params
+          │     └── mesh variant
+          └── each mesh ── many solves    coarse preview, fine verification,
+                                          symmetry on/off, a remote rerun …
+```
+
+Three shapes, and the UI is built on them:
+
+- **One mesh has many solves.** A coarse look and a fine verification of one geometry
+  are two solves of *one* mesh, not two meshes. Solves carry `parentJobId` = the mesh
+  they read, and the designs view renders them inside their mesh's tile.
+- **A mesh can be a variant of another mesh.** `variantOf` records the lineage, so an
+  optimization campaign's twenty trials read as a chain of parameter edits rather than
+  twenty unrelated jobs. `POST /api/jobs/:id/variant` (MCP: `create_mesh_variant`) is
+  the way to make one — it patches the parent's params, so only what changes travels.
+- **A project is the design.** It holds a mesh lineage and every solve computed from
+  it. Projects are optional (unfiled work shows under "Unassigned") and are referenced
+  by id *or by name* — a name that does not exist yet is created, and the same name
+  always resolves to the same project, so a campaign never has to bootstrap one.
+
+`batchId` still records which single request created a job (so a sweep can be cancelled
+as a unit), but grouping for humans is the project.
 
 A **job** is one unit of work: `kind: "mesh"` (generate a mesh) or `kind: "solve"`
 (BEM solve on a finished mesh). Jobs exist *before* they run.
@@ -135,6 +192,9 @@ interface Job {
                            // mesh: generator params
                            // solve: { meshJobId, fmin?, fmax?, count?, backend?, symmetry? }
   target?: JobTarget;      // absent = local
+  projectId?: string;      // "p_xxxxxxxx"; absent = unassigned
+  variantOf?: string;      // mesh -> the mesh it was derived from
+  priority?: number;       // run order within a lane; lower runs first
   batchId?: string;        // "b_xxxxxxxx"
   batchName?: string;
   parentJobId?: string;    // solve -> its mesh job
@@ -152,18 +212,38 @@ interface Job {
 Artifact URLs are always `/artifacts/<jobId>/<path>` — that shape is frozen (it is
 embedded in already-persisted summaries and campaign logs).
 
-## Queue lanes
+## Queue lanes and slots
 
-Lanes are keyed by **target**, each with its own concurrency:
+Lanes are keyed by **target**. A lane runs up to `slots` jobs at once:
 
-| lane key | contents | concurrency |
+| lane key | contents | slots |
 | --- | --- | --- |
-| `local:mesh` | all mesh jobs (meshing never leaves the bridge host) | 1 |
-| `local:solve` | solves with `target.type === "local"` | 1 — **not configurable**, the GPU rule |
-| `remote:<instanceId>` or `remote:<serverUrl>` | solves pinned to that remote | from the target registry, default `BRIDGE_REMOTE_CONCURRENCY` (1) |
+| `local:mesh` | all mesh jobs (meshing never leaves the bridge host) | 1, fixed |
+| `local:solve` | solves with `target.type === "local"` | 1 by default, user-settable |
+| `remote:<instanceId>` or `remote:<serverUrl>` | solves pinned to that remote | target registry, default `BRIDGE_REMOTE_CONCURRENCY` (1) |
+
+**One GPU, one job** is the default everywhere and what you get by doing nothing. It is
+no longer hardcoded, because the rule is right as a default and wrong as a law: a
+two-GPU box wants one solve per card. `PATCH /api/targets/:id {slots, devices}` (MCP:
+`set_target_slots`, UI: the slot pips on a schedule column) sets it per target.
+
+Listing `devices: ["0","1"]` pins one GPU per slot — slot *i*'s child is spawned with
+`CUDA_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` set to `devices[i]`, so the cards are
+genuinely divided rather than two processes racing for card 0. Device pinning applies
+to **local** lanes only; a remote job's blabctl just forwards an HTTP request, and the
+remote server picks its own device. Raising `slots` past the number of pinned devices
+is allowed and reported with a warning: solves sharing a card share its VRAM, so a mesh
+that fits alone can fail alongside another.
+
+Managed Vast servers are currently provisioned with one server-side worker, so their
+single slot is provider-locked. The UI explains this instead of offering extra bridge-side
+slots whose processes would only wait inside the remote server.
+
+**Run order** inside a lane is the job's persisted `priority`, not arrival time, so an
+order arranged on the schedule board survives a bridge restart.
 
 So a batch spanning three remote instances runs three solves in parallel while local
-work stays strictly serialized. A remote solve is dispatched as
+work stays serialized (unless you widen it). A remote solve is dispatched as
 `blabctl solve … --backend server --server-url <url>`; the job's own `backend` param
 is a *local* solver id and is not forwarded.
 
@@ -173,12 +253,39 @@ legible 409 if the flag is definitely absent, rather than letting argparse exit 
 cryptic log. The probe fails open: if it cannot tell (no python, a stubbed CLI, a
 timeout) the launch proceeds. Staging a remote *draft* is always allowed.
 
+## Estimates
+
+Cards on the schedule board carry time, and the numbers are **measured, not modelled**.
+There is no built-in performance curve, because a useful one does not exist: a solve is
+roughly O(triangles²) per frequency point while it fits in VRAM and then falls off a
+cliff when it does not (this machine: 6.8k triangles ≈ 30 s, 13.6k ≈ an hour).
+
+- A **running** job with progress counters is timed from its own counters —
+  `elapsed/done × total`. Nothing beats it.
+- A **waiting** job is scaled from the most similar solve this bridge has actually
+  finished: nearest neighbour in log(triangles), then linear in frequency count and
+  quadratic in triangles. Picking the neighbour first means the scaling only ever
+  interpolates locally, never across the cliff.
+- With **no comparable history**, the answer is `null` and the UI shows `—`. An
+  estimate that rests on one sample is drawn quieter (`weak: true`) rather than hidden.
+
+`GET /api/state` returns `estimates` (per unfinished job) and a per-lane `forecast`
+walking the lane the way the queue will — `slots` at a time, each waiting job dropping
+into whichever slot frees first.
+
 ## Persistence
 
-`data/state.json` is `{ "version": 2, "jobs": [...] }`. A v1 ledger (`{ "runs": [...] }`,
-`parentRunId`, `params.meshRunId`, job dirs under `data/runs/`) is migrated in place on
-first load: the original is copied to `state.json.v1.bak` first, and `data/runs/` is
-renamed to `data/jobs/`. Artifact URLs are untouched.
+`data/state.json` is `{ "version": 3, "jobs": [...], "projects": [...] }`, plus
+feature-owned sections (`vast`, `targetSlots`). Older ledgers are migrated in place on
+first load, with the original copied to `state.json.v<n>.bak` first:
+
+- **v1 → v2** — `{ "runs": [...] }`, `parentRunId`, `params.meshRunId`, job dirs under
+  `data/runs/`; `data/runs/` is renamed to `data/jobs/` and artifact URLs are untouched.
+- **v2 → v3** — projects, mesh lineage and run order. A v2 *mesh batch* was already a
+  family of variants (one generator, one base params, N overrides), so each becomes a
+  project: its oldest mesh is the lineage root and the rest become that root's variants.
+  Solves inherit their mesh's project. Nothing beyond that is invented — meshes created
+  one at a time stay unassigned rather than each becoming a single-mesh project.
 
 blabctl records **absolute** paths (`result.json`'s `cleaned_msh_path`, the solve
 config's mesh reference, and the same strings mirrored into `job.summary`), and a later
@@ -205,21 +312,36 @@ The whole board in one shot (also the first SSE frame).
 {
   "generators": [...], "generatorsError": null,
   "jobs": [Job, ...],                       // newest first
+  "projects": [Project, ...],               // oldest first
   "queue": { "lanes": [
     { "key": "local:solve", "kind": "solve", "targetId": "local",
-      "label": "local solve", "concurrency": 1,
-      "active": ["ab12cd"], "queued": ["ef34gh"] }
+      "label": "local solve", "concurrency": 2, "devices": ["0", "1"],
+      "slots": [{ "jobId": "ab12cd", "slot": 0, "device": "0" }],
+      "active": ["ab12cd"], "queued": ["ef34gh"],
+      "forecast": { "entries": [{ "jobId", "startsInSeconds", "finishesInSeconds",
+                                  "remainingSeconds", "basis" }],
+                    "clearInSeconds": 419, "backlogSeconds": 567 } }
   ]},
-  "targets": [ComputeTarget, ...],
+  "targets": [ComputeTarget & { throughput: {finished, medianSeconds} }, ...],
+  "estimates": { "ef34gh": { "remainingSeconds": 303, "totalSeconds": 303,
+                             "basis": "history", "weak": false } },
   "batches": [BatchSummary, ...],
   "t3": { "configured": false },
   "publicUrl": "http://127.0.0.1:4821"
 }
 ```
+`basis` is `"measured"` (running, from its own counters) | `"history"` | `"cross-target"`
+| `"elapsed"` | `"none"`. `Project` is
+`{ id, name, createdAt, updatedAt?, goal?, color?, archived? }`.
 
 ### `GET /api/targets`
-`{ "targets": [ { "id", "type": "local"|"remote", "label", "serverUrl"?, "concurrency", "status"?, "info"? } ] }`
+`{ "targets": [ { "id", "type": "local"|"remote", "label", "serverUrl"?, "concurrency", "devices"?, "slotsOverridden"?, "slotsLocked"?, "slotLockReason"?, "status"?, "info"? } ] }`
 Always contains `local`. Remote entries come from the instance registry.
+
+### `PATCH /api/targets/:id` — slots and GPU pinning
+Body: `{ slots?: number|null, devices?: string[]|null }` (`null` clears the override).
+→ `{ target: ComputeTarget, warning: string|null }`. `warning` is set when more solves
+than pinned devices will share a card's VRAM. `slots` is capped at 16.
 
 ### `POST /api/generators/refresh`
 Re-reads the python generator catalog. Returns the cache.
@@ -306,6 +428,60 @@ Re-ingests the job directory (post-hoc plots, `metrics.json` score/subscores). �
 → `{ ok: true }`. **409** while running, or while the job is the mesh of a
 draft/queued/running solve.
 
+### `POST /api/jobs/hold` — queued → draft
+Body: `{ jobIds?: string[], batchId?: string }`
+→ `{ held: [{ jobId, name }], skipped: [{ jobId, reason }] }`. The undo for a launch: a
+job that has not started yet goes back to being an editable draft with its configuration
+intact, instead of being cancelled and rebuilt. Running jobs are *skipped* with a reason.
+
+### `POST /api/jobs/:id/variant` — derive a mesh from this mesh
+Body: `{ params?: object, name?: string, project?: string, launch?: boolean }`
+→ the new mesh `Job`, with `variantOf` set and the parent's project inherited.
+`params` is a **patch** over the parent's params; the name defaults to the parent's
+plus what changed.
+
+---
+
+## Projects
+
+### `GET /api/projects` → `{ "projects": [Project, ...] }`
+### `POST /api/projects` — `{ name, goal?, color? }` → `Project`
+### `PATCH /api/projects/:id` — `{ name?, goal?, color?, archived? }` → `Project`
+### `DELETE /api/projects/:id`
+→ `{ unassigned: number }`. The project is forgotten; **its jobs are not deleted**,
+only unassigned.
+
+### `POST /api/projects/assign`
+Body: `{ jobIds: string[], projectId: string|null }` (`null` unassigns).
+→ `{ moved: string[] }`. Moving a **mesh** takes its solves and its variants with it.
+
+---
+
+## The schedule board
+
+### `POST /api/schedule` — drag-and-drop moves
+```jsonc
+{ "moves": [ { "jobId": "ab12cd", "column": "local",   "position": 0 },
+             { "jobId": "ef34gh", "column": "planned" } ] }
+```
+`column` is a compute target id (run it there, launching it if it was a draft) or
+`"planned"` (hold it back as a draft). `position` is the 0-based place in that column's
+waiting line; omit to append. One card per entry, deliberately — two clients
+rearranging at once merge instead of clobbering.
+
+→ `{ moved: [{ jobId, column, lane, queuePosition }], skipped: [{ jobId, reason }] }`
+
+Nothing here destroys work. A **running** job refuses to move (it is already on a
+machine) and is reported under `skipped`; a mesh aimed at a remote column is refused
+too, since meshing never leaves the bridge host.
+
+### `POST /api/schedule/lane` — rewrite one lane's whole waiting order
+Body: `{ laneKey: "local:solve", jobIds: [...] }` → `{ order: string[] }`.
+Ids not waiting in that lane are ignored; waiting jobs the caller omitted keep their
+relative place at the end rather than falling out of the queue.
+
+---
+
 ### `GET /api/batches`
 → `{ "batches": [BatchSummary, ...] }`, newest batch first.
 ```ts
@@ -343,17 +519,24 @@ your t3 thread and solve completions wake you up.
 | --- | --- |
 | `list_generators` | `workspace?` |
 | `list_targets` | `workspace?` |
-| `generate` | `generator`, `params?`, `name?`, `workspace?` — creates **and runs** one mesh, waits up to 120 s |
+| `list_projects` | `workspace?` — designs, with mesh/variant/solve counts and best score |
+| `generate` | `generator`, `params?`, `name?`, `project?`, `variant_of?`, `workspace?` — creates **and runs** one mesh, waits up to 120 s |
+| `create_mesh_variant` | `mesh_job_id`, `params?` (a **patch**), `name?`, `project?`, `launch?`, `workspace?` — the way a campaign should produce each trial |
 | `solve` | `mesh_job_id`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `name?`, `batch_id?`, `workspace?` — creates **and queues** one solve, returns immediately |
-| `create_mesh_jobs` | `generator`, `params?`, `variants?: [{name?, params?}]`, `name?`, `batch_id?`, `launch?`, `workspace?` |
-| `create_solve_jobs` | `mesh_job_ids: string[]`, `variants?: [{name?, target?, fmin?, fmax?, count?, backend?, symmetry?}]`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `name?`, `batch_id?`, `launch?`, `workspace?` |
+| `create_mesh_jobs` | `generator`, `params?`, `variants?: [{name?, params?}]`, `name?`, `batch_id?`, `project?`, `launch?`, `workspace?` |
+| `create_solve_jobs` | `mesh_job_ids: string[]`, `variants?: [{name?, target?, fmin?, fmax?, count?, backend?, symmetry?}]`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `name?`, `batch_id?`, `project?`, `launch?`, `workspace?` |
+| `schedule_jobs` | `moves: [{job_id, column, position?}]` — `column` is a target id or `"planned"` |
+| `set_target_slots` | `target_id`, `slots?` (0 clears), `devices?: string[]` (`[]` clears) |
 | `update_job` | `job_id`, `name?`, `params?`, `mesh_job_id?`, `fmin?`, `fmax?`, `count?`, `backend?`, `symmetry?`, `target?`, `batch_id?` (empty string ungroups), `workspace?` |
 | `launch_jobs` | `job_ids?: string[]`, `batch_id?`, `workspace?` |
 | `cancel_jobs` | `job_ids?: string[]`, `batch_id?`, `workspace?` |
 | `delete_job` | `job_id`, `workspace?` |
-| `get_job` | `job_id`, `workspace?` |
-| `list_jobs` | `kind?`, `status?`, `batch_id?`, `limit?`, `workspace?` |
+| `get_job` | `job_id`, `workspace?` — a mesh also reports its solves and variants |
+| `list_jobs` | `kind?`, `status?`, `batch_id?`, `project_id?`, `mesh_job_id?`, `limit?`, `workspace?` |
 | `spawn_thread` | `title`, `prompt`, `workspace?` |
+
+`project` on any tool is a project id **or a name** — an unknown name creates one, a
+known one resolves to it.
 
 `target` on any tool is the same union as the HTTP API: a string id/URL, or
 `{type, instanceId?, serverUrl?}`.

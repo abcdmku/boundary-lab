@@ -1,11 +1,27 @@
 /**
- * Domain state: the job ledger.
+ * Domain state: projects, and the job ledger underneath them.
  *
  * A job is one unit of work — a mesh generation ('mesh') or a BEM solve
  * ('solve'). Jobs exist BEFORE they run: a job created as a `draft` is fully
- * configured (params, execution target, batch grouping) but is never enqueued
+ * configured (params, execution target, project grouping) but is never enqueued
  * until it is explicitly launched. That is what lets the UI show "10 meshes
  * ready" and a rack of configured-but-unstarted solves.
+ *
+ * The shape the domain actually has, and which this file now models directly:
+ *
+ *   project ──┬── mesh (root)         the geometry family being explored
+ *             │     ├── mesh variant  same design, different params
+ *             │     └── mesh variant
+ *             └── each mesh ── many solves   coarse preview, fine verification,
+ *                                            symmetry on/off, a remote rerun …
+ *
+ * One mesh having MANY solves is the normal case, not the exception: `solve`
+ * jobs carry `parentJobId` = the mesh they read. Mesh variants carry
+ * `variantOf` = the mesh they were derived from, so an optimization campaign's
+ * twenty trial geometries read as one lineage instead of twenty unrelated jobs.
+ *
+ * `priority` is the scheduling order — see queue.ts. It is persisted (not just
+ * an in-memory queue index) so a hand-arranged run order survives a restart.
  *
  * Each job owns a directory DATA_DIR/jobs/<id>/ where blabctl writes its
  * outputs and where job.log accumulates raw process output. This file holds
@@ -22,7 +38,11 @@
  *                       params.meshJobId, job.status may be "draft",
  *                       job.target / job.batchId, directories under
  *                       DATA_DIR/jobs/<id>/
- * loadStore() migrates v1 → v2 in place after backing the old file up.
+ *   v3              — { version: 3, jobs, projects: Project[] }, job.projectId,
+ *                       job.variantOf (mesh lineage), job.priority (run order).
+ *                       batchId/batchName are kept as the record of which one
+ *                       request created a job; grouping moved to projects.
+ * loadStore() migrates in place, oldest → newest, after backing the old file up.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -62,6 +82,25 @@ export interface Progress {
   total?: number;
 }
 
+/**
+ * A design being explored: the family a mesh, its variants and all their
+ * solves belong to. Projects hold no configuration of their own — they are
+ * the unit the human (and the optimization loop) thinks in, and the unit the
+ * UI groups by. Deleting one never deletes jobs; it only unassigns them.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt?: string;
+  /** What this design is trying to achieve — free text, shown on the card. */
+  goal?: string;
+  /** Index into the UI's accent palette; purely cosmetic. */
+  color?: number;
+  /** Archived projects stay queryable but drop out of the default view. */
+  archived?: boolean;
+}
+
 export interface Job {
   id: string;
   kind: JobKind;
@@ -78,7 +117,21 @@ export interface Job {
   params: Record<string, unknown>;
   /** Execution target. Absent means local (v1 records and mesh jobs). */
   target?: JobTarget;
-  /** Optional grouping so a sweep can be listed / launched / cancelled together. */
+  /** The design this job belongs to. Absent = unassigned (see listProjects). */
+  projectId?: string;
+  /**
+   * Mesh jobs only: the mesh this one is a variant of. Absent on a root mesh.
+   * A variant is a re-generation of the same design with different params —
+   * exactly what an optimization campaign produces one trial at a time.
+   */
+  variantOf?: string;
+  /**
+   * Scheduling order within an execution lane; lower runs first. Persisted so
+   * a hand-arranged order survives a bridge restart. Absent = "wherever the
+   * creation order puts it" (normalizePriorities backfills on load).
+   */
+  priority?: number;
+  /** Optional grouping so one create request can be listed / cancelled together. */
   batchId?: string;
   /** Denormalized display label for the batch (same on every job in it). */
   batchName?: string;
@@ -95,11 +148,12 @@ export interface Job {
   artifacts: Artifact[];
 }
 
-export const STATE_VERSION = 2;
+export const STATE_VERSION = 3;
 
 interface PersistedState {
   version: number;
   jobs: Job[];
+  projects: Project[];
   /**
    * Feature-owned top-level sections (see readSection/writeSection). Keeps
    * state.json a single file with a single atomic writer while letting modules
@@ -109,7 +163,7 @@ interface PersistedState {
 }
 
 /** Keys this file owns; everything else in state.json is a feature section. */
-const RESERVED_KEYS = new Set(["version", "jobs", "runs"]);
+const RESERVED_KEYS = new Set(["version", "jobs", "runs", "projects"]);
 
 const stateFile = () => path.join(config.dataDir, "state.json");
 
@@ -224,10 +278,86 @@ export const TERMINAL: ReadonlySet<JobStatus> = new Set(["done", "failed", "canc
 /** Statuses that mean "the queue owns this job right now". */
 export const ACTIVE: ReadonlySet<JobStatus> = new Set(["queued", "running"]);
 
+/**
+ * Priorities are spaced rather than consecutive so a drag-and-drop reorder can
+ * drop a job BETWEEN two others by taking the midpoint, without renumbering
+ * the rest of the lane. reorderPriorities() re-spaces when the gap closes.
+ */
+export const PRIORITY_STEP = 1000;
+
+/**
+ * Where the planned backlog numbers from. Deliberately far above any lane's
+ * numbering so that launching a draft APPENDS to its lane rather than jumping
+ * the queue: the backlog's internal order is meaningful, its position relative
+ * to already-queued work is not. An explicit drop position still wins — that
+ * path renumbers the destination lane (see queue.place).
+ */
+export const BACKLOG_PRIORITY_BASE = 1_000_000;
+
 export const emitter = new EventEmitter();
 emitter.setMaxListeners(200);
 
-let state: PersistedState = { version: STATE_VERSION, jobs: [] };
+let state: PersistedState = { version: STATE_VERSION, jobs: [], projects: [] };
+
+/**
+ * v2 -> v3: give the existing ledger the structure it always implied.
+ *
+ * A v2 *mesh* batch was already a family of variants — one generator, one set
+ * of base params, N param overrides — so each such batch becomes a project,
+ * its oldest mesh becomes the lineage root and the rest become that root's
+ * variants. Solves inherit their mesh's project, because a solve belongs to
+ * whatever design its mesh belongs to.
+ *
+ * Nothing is invented beyond that: meshes created one at a time stay
+ * unassigned (the UI shows them in an "Unassigned" bucket) rather than being
+ * scattered into a project each, which would be noise dressed up as structure.
+ */
+function adoptV3Structure(jobs: Job[]): Project[] {
+  const projects: Project[] = [];
+  const oldest = [...jobs].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const meshBatches = new Map<string, Job[]>();
+  for (const job of oldest) {
+    if (job.kind !== "mesh" || !job.batchId) continue;
+    const list = meshBatches.get(job.batchId);
+    if (list) list.push(job);
+    else meshBatches.set(job.batchId, [job]);
+  }
+
+  for (const [batchId, meshes] of meshBatches) {
+    // A one-mesh "batch" is not a family; leave it unassigned like any other
+    // standalone mesh.
+    if (meshes.length < 2) continue;
+    const project: Project = {
+      id: `p_${batchId.replace(/^b_/, "")}`,
+      name: meshes[0]!.batchName?.trim() || `${meshes[0]!.generator ?? "mesh"} sweep`,
+      createdAt: meshes[0]!.createdAt,
+    };
+    projects.push(project);
+    const [root, ...rest] = meshes;
+    root!.projectId = project.id;
+    for (const variant of rest) {
+      variant.projectId = project.id;
+      // Never overwrite a lineage that is already recorded — a half-migrated
+      // or hand-edited ledger must not have its real parentage flattened.
+      variant.variantOf ??= root!.id;
+    }
+  }
+
+  const projectOfMesh = new Map(oldest.filter((j) => j.kind === "mesh").map((j) => [j.id, j.projectId]));
+  for (const job of oldest) {
+    if (job.kind !== "solve" || job.projectId) continue;
+    const owner = projectOfMesh.get(String(job.parentJobId ?? job.params?.meshJobId ?? ""));
+    if (owner) job.projectId = owner;
+  }
+
+  // Creation order IS the historical run order; make it explicit so the
+  // schedule board has something stable to sort by from the first render.
+  oldest.forEach((job, i) => {
+    if (typeof job.priority !== "number") job.priority = (i + 1) * PRIORITY_STEP;
+  });
+  return projects;
+}
 
 /** Exported for tests: turn any persisted shape into the current one. */
 export function migrateState(raw: unknown): { state: PersistedState; migratedFrom: number | null } {
@@ -239,9 +369,10 @@ export function migrateState(raw: unknown): { state: PersistedState; migratedFro
   const sections = Object.fromEntries(
     Object.entries(obj).filter(([key]) => !RESERVED_KEYS.has(key)),
   );
+  const projects = Array.isArray(obj.projects) ? (obj.projects as Project[]) : [];
   if (version >= STATE_VERSION && Array.isArray(obj.jobs)) {
     return {
-      state: { ...sections, version: STATE_VERSION, jobs: obj.jobs as Job[] },
+      state: { ...sections, version: STATE_VERSION, jobs: obj.jobs as Job[], projects },
       migratedFrom: null,
     };
   }
@@ -271,7 +402,13 @@ export function migrateState(raw: unknown): { state: PersistedState; migratedFro
     if (job.target === undefined) job.target = { type: "local" };
     return job;
   });
-  return { state: { ...sections, version: STATE_VERSION, jobs }, migratedFrom: version };
+  // v2 -> v3 runs for v1 records too: they pass through the v2 shape on the
+  // way, and a one-shot load must not leave half a migration behind.
+  const adopted = adoptV3Structure(jobs);
+  return {
+    state: { ...sections, version: STATE_VERSION, jobs, projects: [...projects, ...adopted] },
+    migratedFrom: version,
+  };
 }
 
 export function loadStore() {
@@ -453,6 +590,122 @@ export const getJob = (id: string) => state.jobs.find((j) => j.id === id);
 export const listJobs = () =>
   [...state.jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
+// ---------- projects ----------
+/** Oldest first — a project list reads as the order the designs were started. */
+export const listProjects = (): Project[] =>
+  [...state.projects].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+export const getProject = (id: string) => state.projects.find((p) => p.id === id);
+
+export function createProject(input: { name: string; goal?: string; color?: number }): Project {
+  const project: Project = {
+    id: `p_${Math.random().toString(36).slice(2, 10)}`,
+    name: input.name,
+    createdAt: now(),
+    ...(input.goal ? { goal: input.goal } : {}),
+    ...(typeof input.color === "number" ? { color: input.color } : {}),
+  };
+  state.projects.push(project);
+  persist();
+  changed();
+  return project;
+}
+
+export function updateProject(
+  id: string,
+  patch: { name?: string; goal?: string | null; color?: number; archived?: boolean },
+): Project | undefined {
+  const project = getProject(id);
+  if (!project) return undefined;
+  if (patch.name !== undefined) project.name = patch.name;
+  if (patch.goal !== undefined) {
+    if (patch.goal === null) delete project.goal;
+    else project.goal = patch.goal;
+  }
+  if (patch.color !== undefined) project.color = patch.color;
+  if (patch.archived !== undefined) project.archived = patch.archived;
+  project.updatedAt = now();
+  persist();
+  changed();
+  return project;
+}
+
+/**
+ * Forget a project. Its jobs are UNASSIGNED, never deleted — a project is a
+ * label on work that took GPU-hours to produce, and dropping the label must
+ * not drop the work. Returns how many jobs were unassigned.
+ */
+export function removeProject(id: string): number {
+  const i = state.projects.findIndex((p) => p.id === id);
+  if (i < 0) return 0;
+  state.projects.splice(i, 1);
+  let unassigned = 0;
+  for (const job of state.jobs) {
+    if (job.projectId !== id) continue;
+    delete job.projectId;
+    unassigned++;
+  }
+  persist();
+  changed();
+  return unassigned;
+}
+
+/** Every job in a project, oldest first. */
+export const listProjectJobs = (projectId: string) =>
+  state.jobs
+    .filter((j) => j.projectId === projectId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+/** Solves that read this mesh, oldest first. The many side of one-mesh-many-solves. */
+export const listSolvesOfMesh = (meshJobId: string) =>
+  state.jobs
+    .filter(
+      (j) =>
+        j.kind === "solve" &&
+        (j.parentJobId === meshJobId || j.params?.meshJobId === meshJobId),
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+/** Meshes derived from this mesh, oldest first. */
+export const listVariantsOfMesh = (meshJobId: string) =>
+  state.jobs
+    .filter((j) => j.kind === "mesh" && j.variantOf === meshJobId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+// ---------- scheduling order ----------
+/** Priority that puts a job at the end of everything currently known. */
+export function nextPriority(): number {
+  let max = 0;
+  for (const job of state.jobs) if (typeof job.priority === "number" && job.priority > max) max = job.priority;
+  return max + PRIORITY_STEP;
+}
+
+/** Effective priority of a job — creation order is the implicit default. */
+export const priorityOf = (job: Job): number =>
+  typeof job.priority === "number" ? job.priority : Number.MAX_SAFE_INTEGER;
+
+/**
+ * Write an explicit order onto a list of jobs. Callers pass the ids in the
+ * order they should run; this re-spaces them by PRIORITY_STEP starting from
+ * `startAt` so later midpoint inserts have room again.
+ */
+export function reorderPriorities(orderedIds: string[], startAt = PRIORITY_STEP) {
+  orderedIds.forEach((id, i) => {
+    const job = getJob(id);
+    if (job) job.priority = startAt + i * PRIORITY_STEP;
+  });
+  persist();
+  changed();
+}
+
+export function setPriority(id: string, priority: number) {
+  const job = getJob(id);
+  if (!job) return;
+  job.priority = priority;
+  persist();
+  changed(id);
+}
+
 // ---------- feature sections ----------
 /**
  * Read a feature-owned section of state.json (e.g. "vast"). Returns the
@@ -521,6 +774,9 @@ export function createJob(input: {
   generator?: string;
   params: Record<string, unknown>;
   target?: JobTarget;
+  projectId?: string;
+  variantOf?: string;
+  priority?: number;
   batchId?: string;
   batchName?: string;
   parentJobId?: string;
@@ -536,6 +792,9 @@ export function createJob(input: {
     ...(input.generator ? { generator: input.generator } : {}),
     params: input.params,
     target: input.target ?? { type: "local" },
+    priority: input.priority ?? nextPriority(),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.variantOf ? { variantOf: input.variantOf } : {}),
     ...(input.batchId ? { batchId: input.batchId } : {}),
     ...(input.batchName ? { batchName: input.batchName } : {}),
     ...(input.parentJobId ? { parentJobId: input.parentJobId } : {}),
@@ -563,6 +822,9 @@ export function updateJob(
     generator?: string;
     params?: Record<string, unknown>;
     target?: JobTarget;
+    projectId?: string | null;
+    variantOf?: string | null;
+    priority?: number;
     batchId?: string | null;
     batchName?: string | null;
     parentJobId?: string;
@@ -575,6 +837,15 @@ export function updateJob(
   if (patch.params !== undefined) job.params = patch.params;
   if (patch.target !== undefined) job.target = patch.target;
   if (patch.parentJobId !== undefined) job.parentJobId = patch.parentJobId;
+  if (patch.priority !== undefined) job.priority = patch.priority;
+  if (patch.projectId !== undefined) {
+    if (patch.projectId === null) delete job.projectId;
+    else job.projectId = patch.projectId;
+  }
+  if (patch.variantOf !== undefined) {
+    if (patch.variantOf === null) delete job.variantOf;
+    else job.variantOf = patch.variantOf;
+  }
   if (patch.batchId !== undefined) {
     if (patch.batchId === null) delete job.batchId;
     else job.batchId = patch.batchId;
@@ -596,6 +867,24 @@ export function markQueued(id: string): boolean {
   job.status = "queued";
   job.launchedAt = now();
   delete job.error;
+  persist();
+  changed(id);
+  return true;
+}
+
+/**
+ * queued -> draft: put a launched-but-not-started job back on the shelf.
+ *
+ * The inverse of markQueued, and the reason a mis-aimed sweep does not have to
+ * be cancelled and rebuilt — dragging a card out of a lane holds it instead of
+ * destroying it. A RUNNING job can never come back this way; its child process
+ * has already started, and only cancel() speaks to that.
+ */
+export function markDraft(id: string): boolean {
+  const job = getJob(id);
+  if (!job || job.status !== "queued") return false;
+  job.status = "draft";
+  delete job.launchedAt;
   persist();
   changed(id);
   return true;
@@ -687,6 +976,15 @@ export function mergeSummary(id: string, patch: Record<string, unknown>) {
 export function removeJob(id: string) {
   const i = state.jobs.findIndex((j) => j.id === id);
   if (i < 0) return;
+  // Re-root any variants of the mesh being removed onto ITS parent, so a
+  // deleted middle of a lineage does not orphan everything below it into
+  // pointing at an id that no longer resolves.
+  const grandparent = state.jobs[i]!.variantOf;
+  for (const job of state.jobs) {
+    if (job.variantOf !== id) continue;
+    if (grandparent) job.variantOf = grandparent;
+    else delete job.variantOf;
+  }
   state.jobs.splice(i, 1);
   fs.rmSync(jobDir(id), { recursive: true, force: true });
   persist();

@@ -1,7 +1,9 @@
 /**
  * Model + migration: a v1 ledger ({runs: […]}, parentRunId, params.meshRunId,
- * job directories under data/runs/) must come out the other side as a v2
- * ledger with every record, artifact URL and on-disk file intact.
+ * job directories under data/runs/) must come out the other side as a CURRENT
+ * ledger with every record, artifact URL and on-disk file intact. Assertions
+ * use store.STATE_VERSION rather than a literal, so adding a migration step
+ * does not make this file a second place to remember to bump.
  */
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
@@ -164,7 +166,7 @@ describe("v1 -> v2 migration", () => {
 
   test("the new ledger is versioned and keyed 'jobs'", () => {
     const written = JSON.parse(fs.readFileSync(path.join(dataDir, "state.json"), "utf8"));
-    assert.equal(written.version, 2);
+    assert.equal(written.version, store.STATE_VERSION);
     assert.ok(Array.isArray(written.jobs));
     assert.equal(written.runs, undefined);
   });
@@ -213,7 +215,7 @@ describe("v1 -> v2 migration", () => {
     const migrated = store.migrateState({ runs: [], vast: seeded, somethingElse: 7 });
     assert.deepEqual(migrated.state.vast, seeded);
     assert.equal(migrated.state.somethingElse, 7);
-    assert.equal(migrated.state.version, 2);
+    assert.equal(migrated.state.version, store.STATE_VERSION);
   });
 
   test("readSection / writeSection round-trip and persist immediately", () => {

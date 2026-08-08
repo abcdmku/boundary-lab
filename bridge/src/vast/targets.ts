@@ -57,6 +57,8 @@ export function toComputeTarget(entry: ManagedInstance): ComputeTarget {
     // waiting in the server's private queue. Raising this needs the bootstrap
     // to advertise and assign matching parallelism first.
     concurrency: 1,
+    slotsLocked: true,
+    slotLockReason: "Managed Vast servers accept one solve at a time",
     available: reason === null,
     ...(reason ? { unavailableReason: reason } : {}),
     status: entry.status,

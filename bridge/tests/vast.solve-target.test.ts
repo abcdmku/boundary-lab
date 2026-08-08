@@ -296,6 +296,7 @@ test("a rented box advertises one solve slot, matching its server's limit", () =
   // that idle in the server's own queue while their timeout clock runs.
   seed({ numGpus: 4 });
   assert.equal(targets.listTargets().find((t) => t.id === TARGET_ID)!.concurrency, 1);
+  assert.equal(targets.listTargets().find((t) => t.id === TARGET_ID)!.slotsLocked, true);
 });
 
 test("a sweep can fan out across several rented boxes, one lane each", () => {

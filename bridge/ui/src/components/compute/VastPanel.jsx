@@ -128,11 +128,21 @@ export function VastPanel({ vast, targets, refetch, notify }) {
             ].map(([id, label]) => (
               <button
                 key={id}
+                id={`vast-tab-${id}`}
                 type="button"
                 role="tab"
                 aria-selected={tab === id}
+                aria-controls={`vast-panel-${id}`}
+                tabIndex={tab === id ? 0 : -1}
                 className={cn("segmented-item", tab === id && "segmented-item--active")}
                 onClick={() => setTab(id)}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                  event.preventDefault();
+                  const next = id === "instances" ? "offers" : "instances";
+                  setTab(next);
+                  requestAnimationFrame(() => document.getElementById(`vast-tab-${next}`)?.focus());
+                }}
               >
                 {label}
               </button>
@@ -142,7 +152,11 @@ export function VastPanel({ vast, targets, refetch, notify }) {
       </div>
 
       {tab === "instances" ? (
-        <>
+        <div
+          id="vast-panel-instances"
+          role="tabpanel"
+          aria-labelledby="vast-tab-instances"
+        >
           <div
             className="panel-body"
             style={{ display: "flex", alignItems: "end", gap: 8, flexWrap: "wrap", paddingBottom: 8 }}
@@ -204,9 +218,14 @@ export function VastPanel({ vast, targets, refetch, notify }) {
               ends all billing.
             </div>
           )}
-        </>
+        </div>
       ) : (
-        <div className="panel-body">
+        <div
+          id="vast-panel-offers"
+          className="panel-body"
+          role="tabpanel"
+          aria-labelledby="vast-tab-offers"
+        >
           <OfferSearch status={status} notify={notify} onRented={() => refetch()} />
         </div>
       )}
