@@ -173,6 +173,32 @@ describe("resolvePreviewFile", () => {
 });
 
 describe("worker recovery", () => {
+  test("a timed-out worker's late exit does not fail its replacement's request", async () => {
+    // The reported race: session A wedges the worker, the timeout kills it and
+    // pumps B into a fresh one, and the dead child's asynchronous 'close' then
+    // rejects B — a request that is running perfectly well.
+    const { config } = await import("../src/config.ts");
+    const previousTimeout = config.previewTimeoutSeconds;
+    config.previewTimeoutSeconds = 0.4;
+    process.env.FAKE_PREVIEW_HANG = "wedged_generator";
+    preview.shutdownPreview(); // pick up the new env in a fresh worker
+    try {
+      const wedged = render("ed-race-a", "wedged_generator");
+      // Queue B behind it, so the timeout's pump() has work to hand a new worker.
+      await new Promise((r) => setTimeout(r, 50));
+      const healthy = render("ed-race-b", "axisym_horn");
+
+      await assert.rejects(wedged, /timed out/);
+      const result = await healthy;
+      assert.equal(result.superseded, undefined, "B must not be superseded");
+      assert.equal(result.triangles, 1234, "B must render, not inherit A's failure");
+    } finally {
+      config.previewTimeoutSeconds = previousTimeout;
+      delete process.env.FAKE_PREVIEW_HANG;
+      preview.shutdownPreview();
+    }
+  });
+
   test("a dead worker is replaced on the next edit", async () => {
     await render("ed-recover");
     // Simulate the worker dying between edits (a crash, an OOM, a stray kill).

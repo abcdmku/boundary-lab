@@ -56,6 +56,12 @@ export const config = {
     process.env.BLAB_PREVIEW_WORKER ?? path.join(repoRoot, "bridge", "py", "mesh_preview_worker.py"),
   /** Idle seconds before the warm preview worker is shut down again. */
   previewIdleSeconds: positiveNumber(process.env.BLAB_PREVIEW_IDLE_SECONDS, 300, "BLAB_PREVIEW_IDLE_SECONDS"),
+  /** A preview slower than this means the worker is wedged; it gets replaced. */
+  previewTimeoutSeconds: positiveNumber(
+    process.env.BLAB_PREVIEW_TIMEOUT_SECONDS,
+    90,
+    "BLAB_PREVIEW_TIMEOUT_SECONDS",
+  ),
   dataDir: process.env.DATA_DIR ?? path.join(bridgeRoot, "data"),
   t3BaseUrl: process.env.T3_BASE_URL?.replace(/\/$/, "") ?? null,
   t3Token: process.env.T3_TOKEN ?? null,

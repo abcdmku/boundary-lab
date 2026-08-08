@@ -28,6 +28,8 @@ Dashboard: http://127.0.0.1:4821 — MCP: `POST http://127.0.0.1:4821/mcp`
 | `BLAB_JULIA_EXECUTABLE` | Julia 1.12.6 install path | passed to solver children |
 | `BRIDGE_REMOTE_CONCURRENCY` | `1` | default concurrent jobs per remote instance |
 | `BLAB_PREVIEW_IDLE_SECONDS` | `300` | idle time before the mesh-editor preview worker is shut down |
+| `BLAB_PREVIEW_TIMEOUT_SECONDS` | `90` | a preview slower than this means the worker is wedged; it gets replaced |
+| `BLAB_ATH_LOCK_TIMEOUT_S` | `240` (`5` in previews) | wait for the shared `ath.cfg` lock before giving up |
 | `T3_BASE_URL` / `T3_TOKEN` | unset | optional; enables thread spawn + wake-up |
 
 Without t3 configured everything works except thread orchestration.
@@ -346,6 +348,16 @@ One request is in flight at a time (gmsh is not reentrant), with at most one
 queueing behind it, so dragging a slider costs one render per settle. The worker is
 started on first use and shut down after `BLAB_PREVIEW_IDLE_SECONDS` (default 300)
 of silence, or after 200 renders, whichever comes first.
+
+**Ath is the exception to "previews are independent."** `ath.exe` reads its config
+from a single `ath/ath.cfg` beside the executable, and the runner reads
+`OutputRootDir` back out of that same file to learn where a run landed — so two
+Ath generations cannot overlap, or the second redirects the first's output into
+its own directory. `blab.ath.ath_config_lock` is a cross-process lock file that
+covers the write-then-run window, taken by mesh jobs and previews alike. A
+preview waits only `BLAB_ATH_LOCK_TIMEOUT_S` (5 s) before answering 422 with
+"another Ath generation is running", rather than hanging the editor behind a
+multi-minute mesh job.
 
 ### `POST /api/preview`
 ```jsonc

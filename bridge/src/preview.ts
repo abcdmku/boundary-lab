@@ -34,8 +34,6 @@ const KEEP_GENERATIONS = 3;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 /** Requests served before the worker is recycled. */
 const RECYCLE_AFTER = 200;
-/** A single preview that takes longer than this means the worker is wedged. */
-const REQUEST_TIMEOUT_MS = 90_000;
 
 /** Session ids come from the browser, and name a directory. Keep them boring. */
 export const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -181,8 +179,19 @@ interface Worker {
 }
 
 let worker: Worker | null = null;
-let inFlight: { id: number; seq: number; request: PendingRequest; timer: NodeJS.Timeout } | null =
-  null;
+/**
+ * The request currently with the worker. It records WHICH worker, because a
+ * killed child's 'close' arrives asynchronously — by then the queue may have
+ * pumped a new request into a replacement worker, and an unconditional failure
+ * here would reject a request that is running perfectly well.
+ */
+let inFlight: {
+  id: number;
+  seq: number;
+  request: PendingRequest;
+  timer: NodeJS.Timeout;
+  worker: Worker;
+} | null = null;
 /** At most one waiting request per session; a newer edit replaces the older. */
 const queued = new Map<string, PendingRequest>();
 let nextRequestId = 1;
@@ -204,13 +213,18 @@ function stopWorker(reason?: string) {
   if (!current) return;
   current.rl.close();
   killTree(current.child);
-  if (reason && inFlight) failInFlight(new PreviewError(reason, 503));
+  if (reason) failInFlight(new PreviewError(reason, 503), current);
 }
 
-function failInFlight(err: Error) {
+/**
+ * Reject the in-flight request. `owner` scopes the failure to requests that
+ * belong to that worker; a retired worker must never fail its successor's work.
+ */
+function failInFlight(err: Error, owner?: Worker) {
   const current = inFlight;
-  inFlight = null;
   if (!current) return;
+  if (owner && current.worker !== owner) return;
+  inFlight = null;
   clearTimeout(current.timer);
   current.request.reject(err);
 }
@@ -223,6 +237,11 @@ function startWorker(): Worker {
       ...(config.juliaExecutable
         ? { BLAB_JULIA_EXECUTABLE: config.juliaExecutable, BLAB_JULIA_EXE: config.juliaExecutable }
         : {}),
+      // Ath's config is shared, so a preview of an Ath generator has to wait for
+      // any real Ath mesh job to finish (see blab.ath.ath_config_lock). A job
+      // may run for minutes; an editor must not hang that long, so previews
+      // give up quickly and say why rather than queueing behind it.
+      BLAB_ATH_LOCK_TIMEOUT_S: process.env.BLAB_ATH_LOCK_TIMEOUT_S ?? "5",
     },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
@@ -254,7 +273,7 @@ function startWorker(): Worker {
   });
   child.on("error", (err) => {
     if (worker === started) worker = null;
-    failInFlight(new PreviewError(`failed to spawn ${config.python}: ${err.message}`, 503));
+    failInFlight(new PreviewError(`failed to spawn ${config.python}: ${err.message}`, 503), started);
   });
   child.on("close", (code) => {
     if (worker === started) worker = null;
@@ -264,6 +283,7 @@ function startWorker(): Worker {
         `preview worker exited (code ${code}) before answering${tail ? ` — ${tail}` : ""}`,
         503,
       ),
+      started,
     );
     pump();
   });
@@ -281,7 +301,9 @@ function ensureWorker(): Worker {
 
 function onResponse(from: Worker, message: WorkerResponse) {
   const current = inFlight;
-  if (!current || current.id !== message.id) return; // a superseded/timed-out reply
+  // Ignore anything that is not the answer this worker owes us: a late reply
+  // from a retired worker, or one for a request that already timed out.
+  if (!current || current.id !== message.id || current.worker !== from) return;
   inFlight = null;
   clearTimeout(current.timer);
   from.served += 1;
@@ -338,12 +360,13 @@ function pump() {
   const timer = setTimeout(() => {
     // A wedged gmsh must not wedge the editor: drop the worker, let the next
     // edit start a fresh one.
+    const owner = inFlight?.worker;
     stopWorker();
-    failInFlight(new PreviewError("preview timed out", 504));
+    failInFlight(new PreviewError("preview timed out", 504), owner);
     pump();
-  }, REQUEST_TIMEOUT_MS);
+  }, config.previewTimeoutSeconds * 1000);
   timer.unref?.();
-  inFlight = { id, seq, request, timer };
+  inFlight = { id, seq, request, timer, worker: active };
 
   active.child.stdin!.write(
     JSON.stringify({ id, generator: request.generator, params: request.params, out: outDir }) + "\n",

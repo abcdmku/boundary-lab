@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -37,6 +39,85 @@ ATH_CFG_OUTPUT_ROOT_KEY = "OutputRootDir"
 ATH_CFG_MESH_CMD_KEY = "MeshCmd"
 SOLVING_SYM_RE = re.compile(r"\bSym\s*=\s*([A-Za-z]+)\b")
 WINE_PLATFORMS = {"linux", "darwin"}
+
+
+class AthBusyError(RuntimeError):
+    """Another process is inside the ath.cfg critical section (see ath_config_lock)."""
+
+
+@contextlib.contextmanager
+def ath_config_lock(ath_exe: Path, *, timeout_s: float | None = None):
+    """Serialize the write-ath.cfg-then-run-Ath window across processes.
+
+    Ath reads its companion ath.cfg from beside the executable, and
+    AthProcessRunner reads OutputRootDir back out of that same file to learn
+    where a run landed. Two Ath generations therefore cannot overlap: the
+    second's `write_ath_output_root` redirects the first's output into the
+    second's directory.
+
+    That is not hypothetical. Mesh jobs run Ath from the bridge's queue while
+    the live mesh editor previews the same generator from a separate warm
+    worker process, and the editor deletes its scratch directory when it
+    closes — which would take a real job's mesh with it and break every solve
+    that referenced it. A lock file beside ath.cfg is the only thing both
+    processes can see, so that is where the mutual exclusion lives.
+
+    Held across BOTH the config write and the Ath run; a lock around only the
+    write would not help, because the run is what reads the value back.
+    """
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("BLAB_ATH_LOCK_TIMEOUT_S", "240") or 240)
+    lock_path = ath_exe.resolve().parent / "ath.cfg.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    deadline = time.monotonic() + timeout_s
+    handle = open(lock_path, "a+b")  # noqa: SIM115 - released in the finally below
+    try:
+        while True:
+            try:
+                _lock_exclusive_nonblocking(handle)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise AthBusyError(
+                        f"Timed out after {timeout_s:g}s waiting for {lock_path.name}: another Ath "
+                        "generation is running. Ath's config is shared, so its runs cannot overlap."
+                    ) from None
+                time.sleep(0.1)
+        try:
+            yield lock_path
+        finally:
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+def _lock_exclusive_nonblocking(handle) -> None:
+    """Take an exclusive advisory lock, or raise OSError if someone else holds it."""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass  # the handle is closing anyway; the OS drops the lock with it
 
 
 class AthCancelledError(RuntimeError):

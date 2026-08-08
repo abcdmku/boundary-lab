@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from blab.ath import (
+    ath_config_lock,
     ath_mirror_axes_for_result,
     clean_ath_mesh_output,
     clean_ath_reduced_mesh_output,
@@ -232,11 +233,19 @@ def generate(params: dict, out_dir: Path, name: str, emit: Callable[[dict], None
     config_text = str(raw_cfg) if raw_cfg else _build_cfg(params)
 
     ath_cfg = ATH_EXE.parent / "ath.cfg"
-    write_ath_output_root(ath_cfg, out_dir)
-    write_ath_gmsh_path(ath_cfg, GMSH_EXE)
+    # ath.cfg is shared by every process that runs Ath, and the run reads
+    # OutputRootDir back out of it — so the write and the run are one critical
+    # section. Without this, a mesh job and a live-editor preview of this same
+    # generator interleave and the job's output lands in the preview's scratch
+    # directory, which the editor deletes when it closes.
+    with ath_config_lock(ATH_EXE):
+        write_ath_output_root(ath_cfg, out_dir)
+        write_ath_gmsh_path(ath_cfg, GMSH_EXE)
 
-    emit({"event": "progress", "stage": "ath", "message": f"Running ath.exe ({name})"})
-    result = run_ath(ath_exe=ATH_EXE, config_text=config_text, run_root=out_dir, case_name=name, timeout_s=180.0)
+        emit({"event": "progress", "stage": "ath", "message": f"Running ath.exe ({name})"})
+        result = run_ath(
+            ath_exe=ATH_EXE, config_text=config_text, run_root=out_dir, case_name=name, timeout_s=180.0
+        )
 
     emit({"event": "progress", "stage": "clean", "message": "Cleaning Ath mesh output"})
     # Which planes Ath mirrored the reduced mesh across (from its solving file):
