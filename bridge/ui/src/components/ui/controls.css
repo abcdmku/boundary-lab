@@ -36,6 +36,18 @@
 .modal-panel--xwide {
   max-width: 1120px;
 }
+/* Whole-viewport surface: for content that is the point, not a form to dismiss. */
+.modal-overlay--full {
+  padding: 0;
+  overflow: hidden;
+}
+.modal-panel--full {
+  max-width: none;
+  height: 100vh;
+  max-height: 100vh;
+  border: 0;
+  border-radius: 0;
+}
 .modal-head {
   display: flex;
   align-items: flex-start;

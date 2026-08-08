@@ -62,3 +62,6 @@ src/blab/solvers/julia_local/results/
 src/blab/solvers/julia_local/runs/
 src/blab/solvers/julia_local/test_meshes/staged_symmetry/
 LocalPreferences.toml
+
+# Cross-process mutex for the shared ath.cfg (blab.ath.ath_config_lock)
+ath/ath.cfg.lock

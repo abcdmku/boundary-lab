@@ -41,6 +41,9 @@
  *   POST   /api/batches/:batchId/cancel
  *   DELETE /api/batches/:batchId
  *   GET    /api/events                    SSE
+ *   POST   /api/preview                   live mesh editor: render params now
+ *   GET    /api/preview/:session/:seq/:f  the STLs that preview produced
+ *   DELETE /api/preview/:session          drop an editor's scratch geometry
  *   /api/vast/*                           rented vast.ai GPUs (see src/vast/routes.ts)
  *   GET    /artifacts/:jobId/*            files from a job's directory
  */
@@ -52,6 +55,7 @@ import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
 import * as actions from "./actions.ts";
+import * as preview from "./preview.ts";
 import { listTargets } from "./targets.ts";
 import { buildMcpServer } from "./mcp.ts";
 import { refreshGenerators } from "./generators.ts";
@@ -71,6 +75,7 @@ const shutdown = (signal: NodeJS.Signals) => {
   shuttingDown = true;
   console.log(`[bridge] ${signal}: terminating active jobs, then exiting`);
   queue.shutdownAll(`bridge shutdown (${signal})`);
+  preview.shutdownPreview();
   // Short grace so kill + state persistence land, then exit (the store's
   // process 'exit' hook does a final synchronous persist).
   setTimeout(() => process.exit(0), 1500);
@@ -458,6 +463,39 @@ app.get("/api/events", (req, res) => {
 
 // ---------- compute providers: rented vast.ai GPUs ----------
 app.use("/api/vast", vastRouter);
+
+// ---------- live mesh editor: preview geometry, outside the job queue ----------
+// A preview is not a job (see src/preview.ts): no board row, no run directory,
+// and it must never wait behind a queued solve.
+app.post("/api/preview", async (req, res) => {
+  const { sessionId, generator, params } = req.body ?? {};
+  try {
+    const result = await preview.requestPreview({
+      sessionId,
+      generator,
+      params: asObject(params, "params") ?? {},
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err instanceof preview.PreviewError ? err.status : 500;
+    res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/preview/:sessionId/:seq/:file", (req, res) => {
+  const file = preview.resolvePreviewFile(req.params.sessionId, req.params.seq, req.params.file);
+  if (!file) return res.status(404).json({ error: "no such preview" });
+  // Each generation gets its own directory, so a URL's contents never change.
+  res.setHeader("Cache-Control", "private, max-age=300, immutable");
+  res.sendFile(file);
+});
+
+app.delete("/api/preview/:sessionId", (req, res) => {
+  if (!preview.SESSION_ID_RE.test(req.params.sessionId))
+    return res.status(400).json({ error: "bad sessionId" });
+  preview.dropSession(req.params.sessionId);
+  res.json({ ok: true });
+});
 
 // ---------- artifacts: files from a job's directory ----------
 // The /artifacts/<id>/… path shape is frozen: artifact URLs are embedded in

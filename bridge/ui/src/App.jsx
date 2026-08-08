@@ -5,7 +5,7 @@ import { DesignsView } from "./components/designs/DesignsView.jsx";
 import { ScheduleView } from "./components/schedule/ScheduleView.jsx";
 import { MachinesDialog } from "./components/compute/MachinesDialog.jsx";
 import { JobDialog } from "./components/jobs/JobDialog.jsx";
-import { NewMeshDialog } from "./components/jobs/NewMeshDialog.jsx";
+import { MeshEditor } from "./components/jobs/MeshEditor.jsx";
 import { SolveDialog } from "./components/jobs/SolveDialog.jsx";
 import { BatchDialog } from "./components/jobs/BatchDialog.jsx";
 import { Toasts } from "./components/Toasts.jsx";
@@ -120,7 +120,7 @@ export default function App() {
         <MachinesDialog state={state} refetch={refetch} notify={notify} onClose={close} />
       )}
       {dialog?.type === "mesh" && (
-        <NewMeshDialog
+        <MeshEditor
           generators={state?.generators || []}
           initialGeneratorId={dialog.generatorId}
           initialProjectId={dialog.projectId}

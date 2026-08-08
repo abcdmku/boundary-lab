@@ -10,6 +10,9 @@ import "./controls.css";
  *
  * Deliberately not a <dialog>: the board behind it keeps updating over SSE and
  * the top-layer's inertness would hide those live status changes.
+ *
+ * `size="full"` takes the whole viewport, for the surfaces whose content IS the
+ * point (the mesh editor's viewport) rather than a form you fill and dismiss.
  */
 export function Modal({ title, subtitle, onClose, children, footer, size = "md", labelledBy }) {
   const panelRef = useRef(null);
@@ -84,7 +87,7 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
 
   return (
     <div
-      className="modal-overlay"
+      className={cn("modal-overlay", size === "full" && "modal-overlay--full")}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -100,6 +103,7 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
           "modal-panel",
           size === "wide" && "modal-panel--wide",
           size === "xwide" && "modal-panel--xwide",
+          size === "full" && "modal-panel--full",
         )}
         onMouseDown={(e) => e.stopPropagation()}
       >
