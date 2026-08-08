@@ -1,4 +1,5 @@
 import { cn } from "../../lib/cn";
+import "./jobs.css";
 
 const MOD = {
   running: "job-dot--running",

@@ -14,12 +14,14 @@ export function MeshTab({ job, jobs, onOpenLightbox }) {
   }
   if (previewUrl) {
     return (
-      <img
-        src={previewUrl}
-        alt="mesh preview"
-        onClick={() => onOpenLightbox(previewUrl)}
-        className="mesh-preview"
-      />
+      <button
+        type="button"
+        className="mesh-preview-button"
+        onClick={() => onOpenLightbox(previewUrl, `${meshJob?.name || "mesh"} preview`)}
+        aria-label="Open mesh preview"
+      >
+        <img src={previewUrl} alt="mesh preview" className="mesh-preview" />
+      </button>
     );
   }
   return <div className="job-tab-empty">No mesh preview available</div>;

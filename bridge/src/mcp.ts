@@ -10,9 +10,20 @@
  * Tool results are compact summaries + URLs, never file dumps. Artifact URLs
  * open in any browser (and t3code's preview pane).
  *
- * Vocabulary: a JOB is one unit of work (mesh generation or BEM solve). Jobs
- * can be created as DRAFTS (configured, not started), grouped into a BATCH,
- * and pinned to an execution TARGET (this machine, or a remote solver server).
+ * Vocabulary:
+ *   JOB      one unit of work — a mesh generation, or a BEM solve.
+ *   PROJECT  the design being explored. Holds a family of meshes and every
+ *            solve computed from them.
+ *   VARIANT  a mesh derived from another mesh: same design, different params.
+ *            An optimization campaign's trials are variants.
+ *   DRAFT    a job that is fully configured but has not been started.
+ *   TARGET   a machine a solve can run on (this box, or a remote server).
+ *   SLOT     one concurrent job on a target. One slot per GPU by default.
+ *
+ * The shapes that matter: ONE MESH HAS MANY SOLVES (a coarse preview and a
+ * fine verification of the same geometry are two solves, not two meshes), and
+ * one project has many mesh variants. Tools reflect that — create_mesh_variant
+ * for geometry, create_solve_jobs for answers about it.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -114,12 +125,26 @@ async function resolveThreadId(workspace: string | undefined) {
   return { workspace, threadId: resolved?.live ? resolved.threadId : undefined };
 }
 
+/** Project name (not just its id) — an id alone tells an agent nothing. */
+const projectRef = (job: store.Job) =>
+  job.projectId
+    ? { project: { id: job.projectId, name: store.getProject(job.projectId)?.name ?? job.projectId } }
+    : {};
+
 const jobReport = (job: store.Job) => ({
   jobId: job.id,
   kind: job.kind,
   name: job.name,
   status: job.status,
   target: targetLabel(job.target),
+  ...projectRef(job),
+  ...(job.variantOf ? { variantOf: job.variantOf } : {}),
+  ...(job.kind === "mesh"
+    ? {
+        solves: store.listSolvesOfMesh(job.id).map((s) => ({ jobId: s.id, name: s.name, status: s.status })),
+        variants: store.listVariantsOfMesh(job.id).map((v) => ({ jobId: v.id, name: v.name, status: v.status })),
+      }
+    : {}),
   ...(job.batchId ? { batchId: job.batchId } : {}),
   ...(job.parentJobId ? { meshJobId: job.parentJobId } : {}),
   ...(job.progress ? { progress: job.progress } : {}),
@@ -135,6 +160,7 @@ const jobBrief = (job: store.Job) => ({
   name: job.name,
   status: job.status,
   target: targetLabel(job.target),
+  ...projectRef(job),
   ...(job.kind === "solve"
     ? {
         meshJobId: job.params.meshJobId ?? null,
@@ -204,13 +230,34 @@ export function buildMcpServer(): McpServer {
         .optional()
         .describe("Generator parameters, matching the generator's JSON Schema from list_generators."),
       name: z.string().optional().describe("Human-readable job name."),
+      project: z
+        .string()
+        .optional()
+        .describe(
+          "Project id or name to file this mesh under. A name that does not exist yet is created. " +
+            "Use one project per design you are exploring so its variants and solves stay together.",
+        ),
+      variant_of: z
+        .string()
+        .optional()
+        .describe(
+          "Mesh job id this is a variant of. Prefer create_mesh_variant, which patches the " +
+            "parent's params for you.",
+        ),
       workspace: workspaceArg,
     },
-    async ({ generator, params, name, workspace }) => {
+    async ({ generator, params, name, project, variant_of, workspace }) => {
       const ctx = await resolveThreadId(workspace);
       let job: store.Job;
       try {
-        job = actions.startGenerate({ generator, params, name, ...ctx });
+        job = actions.startGenerate({
+          generator,
+          params,
+          name,
+          ...(project ? { project } : {}),
+          ...(variant_of ? { variantOf: variant_of } : {}),
+          ...ctx,
+        });
       } catch (err) {
         return errText("generate", err);
       }
@@ -253,8 +300,12 @@ export function buildMcpServer(): McpServer {
             : null,
         preview: previewUrl(finished),
         artifacts: artifactUrls(finished),
+        ...projectRef(finished),
         ui: `${config.publicUrl}/`,
-        next: `solve {"mesh_job_id":"${finished.id}"} runs one BEM solve on this mesh; create_solve_jobs runs a sweep`,
+        next:
+          `solve {"mesh_job_id":"${finished.id}"} runs one BEM solve on this mesh; ` +
+          `create_solve_jobs runs several on it (coarse + fine is the normal case); ` +
+          `create_mesh_variant {"mesh_job_id":"${finished.id}"} derives the next geometry`,
       });
     },
   );
@@ -342,13 +393,17 @@ export function buildMcpServer(): McpServer {
       target: targetArg,
       name: z.string().optional().describe("Batch label; each job's name is derived from it."),
       batch_id: z.string().optional().describe("Reuse an existing batch id instead of a new one."),
+      project: z
+        .string()
+        .optional()
+        .describe("Project id or name. Defaults to whatever project each mesh already belongs to."),
       launch: z
         .boolean()
         .optional()
         .describe("true = queue them now. false/omitted = leave them as editable drafts."),
       workspace: workspaceArg,
     },
-    async ({ mesh_job_ids, variants, fmin, fmax, count, backend, symmetry, target, name, batch_id, launch, workspace }) => {
+    async ({ mesh_job_ids, variants, fmin, fmax, count, backend, symmetry, target, name, batch_id, project, launch, workspace }) => {
       const ctx = await resolveThreadId(workspace);
       try {
         const result = actions.createBatch({
@@ -359,6 +414,7 @@ export function buildMcpServer(): McpServer {
           target,
           ...(name ? { name } : {}),
           ...(batch_id ? { batchId: batch_id } : {}),
+          ...(project ? { project } : {}),
           launch: launch === true,
           ...ctx,
         });
@@ -400,10 +456,17 @@ export function buildMcpServer(): McpServer {
         .describe("One job per entry. Omit for a single job with the shared params."),
       name: z.string().optional().describe("Batch label; each job's name is derived from it."),
       batch_id: z.string().optional(),
+      project: z
+        .string()
+        .optional()
+        .describe(
+          "Project id or name for the whole family. Defaults to a project named after the batch — " +
+            "a mesh sweep IS a family of variants, and it is filed as one.",
+        ),
       launch: z.boolean().optional(),
       workspace: workspaceArg,
     },
-    async ({ generator, params, variants, name, batch_id, launch, workspace }) => {
+    async ({ generator, params, variants, name, batch_id, project, launch, workspace }) => {
       const ctx = await resolveThreadId(workspace);
       try {
         const result = actions.createBatch({
@@ -413,6 +476,7 @@ export function buildMcpServer(): McpServer {
           variants: variants as actions.BatchVariant[] | undefined,
           ...(name ? { name } : {}),
           ...(batch_id ? { batchId: batch_id } : {}),
+          ...(project ? { project } : {}),
           launch: launch === true,
           ...ctx,
         });
@@ -429,6 +493,167 @@ export function buildMcpServer(): McpServer {
         });
       } catch (err) {
         return errText("create_mesh_jobs", err);
+      }
+    },
+  );
+
+  server.tool(
+    "list_projects",
+    "List the designs this bridge holds. A PROJECT groups a family of mesh variants and every " +
+      "solve computed from them — it is the unit to reason in when comparing geometries. Each " +
+      "row carries its mesh count, how many of those meshes are variants of another, its solve " +
+      "count and the best score seen so far. Pass a project's name (or id) as `project` to " +
+      "generate / create_mesh_jobs / create_solve_jobs / create_mesh_variant; a name that does " +
+      "not exist yet is created, so an optimization campaign never has to bootstrap one.",
+    { workspace: workspaceArg },
+    async () =>
+      text({
+        projects: store.listProjects().map((p) => {
+          const jobs = store.listProjectJobs(p.id);
+          const meshes = jobs.filter((j) => j.kind === "mesh");
+          const solves = jobs.filter((j) => j.kind === "solve");
+          const scores = solves
+            .map((s) => (s.summary as Record<string, unknown> | undefined)?.score)
+            .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+          return {
+            projectId: p.id,
+            name: p.name,
+            ...(p.goal ? { goal: p.goal } : {}),
+            meshes: meshes.length,
+            variants: meshes.filter((m) => m.variantOf).length,
+            solves: solves.length,
+            solvesDone: solves.filter((s) => s.status === "done").length,
+            ...(scores.length ? { bestScore: Math.max(...scores) } : {}),
+          };
+        }),
+        unassignedMeshes: store
+          .listJobs()
+          .filter((j) => j.kind === "mesh" && !j.projectId).length,
+        ui: `${config.publicUrl}/`,
+      }),
+  );
+
+  server.tool(
+    "create_mesh_variant",
+    "Derive a NEW mesh from an existing one: same generator, its params with your overrides " +
+      "applied, and a recorded link back to the parent. This is how an optimization campaign " +
+      "should produce each trial — the variants then read as one lineage in the dashboard " +
+      "instead of N unrelated meshes, and they inherit the parent's project automatically. " +
+      "`params` is a PATCH, so pass only what changes. Draft by default; `launch: true` queues it " +
+      "on the local mesh lane.",
+    {
+      mesh_job_id: z.string().describe("Mesh job to derive from (any status)."),
+      params: z
+        .record(z.unknown())
+        .optional()
+        .describe("Parameter overrides merged over the parent's params. Only what changes."),
+      name: z.string().optional().describe("Defaults to the parent's name plus what changed."),
+      project: z
+        .string()
+        .optional()
+        .describe("Project id or name. Defaults to the parent mesh's project."),
+      launch: z.boolean().optional().describe("true = generate it now."),
+      workspace: workspaceArg,
+    },
+    async ({ mesh_job_id, params, name, project, launch, workspace }) => {
+      const ctx = await resolveThreadId(workspace);
+      try {
+        const job = actions.createMeshVariant({
+          meshJobId: mesh_job_id,
+          params,
+          ...(name ? { name } : {}),
+          ...(project ? { project } : {}),
+          launch: launch === true,
+          ...ctx,
+        });
+        return text({
+          ...jobBrief(job),
+          params: job.params,
+          variantOf: mesh_job_id,
+          note: launch
+            ? "Queued on the local mesh lane — poll get_job."
+            : `Draft created. launch_jobs {"job_ids":["${job.id}"]} when ready.`,
+        });
+      } catch (err) {
+        return errText("create_mesh_variant", err);
+      }
+    },
+  );
+
+  server.tool(
+    "schedule_jobs",
+    "Decide WHERE and IN WHAT ORDER staged work runs — the programmatic half of the dashboard's " +
+      "schedule board. Each move drops one job into a column: a target id from list_targets (runs " +
+      "it there, launching it if it was a draft) or 'planned' (holds it back as a draft). " +
+      "`position` is its 0-based place in that column's waiting line; omit it to append. Running " +
+      "jobs never move — they are already on a machine — and are reported under `skipped` with " +
+      "the reason. Nothing is ever destroyed: holding a queued job keeps its configuration.",
+    {
+      moves: z
+        .array(
+          z.object({
+            job_id: z.string(),
+            column: z
+              .string()
+              .describe("A target id from list_targets, or 'planned' to hold it as a draft."),
+            position: z.number().int().min(0).optional(),
+          }),
+        )
+        .min(1),
+      workspace: workspaceArg,
+    },
+    async ({ moves }) => {
+      try {
+        const result = actions.scheduleJobs(
+          moves.map((m) => ({
+            jobId: m.job_id,
+            column: m.column,
+            ...(m.position !== undefined ? { position: m.position } : {}),
+          })),
+        );
+        return text({
+          ...result,
+          lanes: queue.queueSnapshot().lanes,
+          ui: `${config.publicUrl}/`,
+        });
+      } catch (err) {
+        return errText("schedule_jobs", err);
+      }
+    },
+  );
+
+  server.tool(
+    "set_target_slots",
+    "Set how many solves a target runs at once, and (locally) which GPU each slot gets. Default " +
+      "everywhere is 1 — one GPU, one job. Raise it to run one solve per card on a multi-GPU box " +
+      "by listing `devices` (e.g. ['0','1'], which also sets the slot count), or to share a card " +
+      "between small solves by raising `slots` alone. Sharing a card means sharing its VRAM: a " +
+      "mesh that fits when alone can fail alongside another, and the returned `warning` says so. " +
+      "Pass slots: 0 to clear the override and return to the default.",
+    {
+      target_id: z.string().describe("Target id from list_targets, e.g. 'local'."),
+      slots: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Concurrent solves. 0 clears the override."),
+      devices: z
+        .array(z.string())
+        .optional()
+        .describe("GPU index per slot, e.g. ['0','1']. Local targets only. [] clears the pinning."),
+      workspace: workspaceArg,
+    },
+    async ({ target_id, slots, devices }) => {
+      try {
+        return text(
+          actions.setTargetSlots(target_id, {
+            ...(slots !== undefined ? { slots: slots === 0 ? null : slots } : {}),
+            ...(devices !== undefined ? { devices: devices.length === 0 ? null : devices } : {}),
+          }),
+        );
+      } catch (err) {
+        return errText("set_target_slots", err);
       }
     },
   );
@@ -560,14 +785,24 @@ export function buildMcpServer(): McpServer {
       kind: z.enum(["mesh", "solve"]).optional(),
       status: z.enum(["draft", "queued", "running", "done", "failed", "cancelled"]).optional(),
       batch_id: z.string().optional(),
+      project_id: z.string().optional().describe("Only jobs filed under this project."),
+      mesh_job_id: z
+        .string()
+        .optional()
+        .describe("Only the solves of this mesh — the many side of one-mesh-many-solves."),
       limit: z.number().int().min(1).max(200).optional().describe("Max rows (default 20)."),
       workspace: workspaceArg,
     },
-    async ({ kind, status, batch_id, limit }) => {
+    async ({ kind, status, batch_id, project_id, mesh_job_id, limit }) => {
       let jobs = store.listJobs();
       if (kind) jobs = jobs.filter((j) => j.kind === kind);
       if (status) jobs = jobs.filter((j) => j.status === status);
       if (batch_id) jobs = jobs.filter((j) => j.batchId === batch_id);
+      if (project_id) jobs = jobs.filter((j) => j.projectId === project_id);
+      if (mesh_job_id)
+        jobs = jobs.filter(
+          (j) => j.parentJobId === mesh_job_id || j.params?.meshJobId === mesh_job_id,
+        );
       const rows = jobs.slice(0, limit ?? 20).map((j) => ({
         jobId: j.id,
         kind: j.kind,
@@ -575,6 +810,8 @@ export function buildMcpServer(): McpServer {
         status: j.status,
         target: targetLabel(j.target),
         createdAt: j.createdAt,
+        ...projectRef(j),
+        ...(j.variantOf ? { variantOf: j.variantOf } : {}),
         ...(j.batchId ? { batchId: j.batchId } : {}),
         ...(j.generator ? { generator: j.generator } : {}),
         ...(j.parentJobId ? { meshJobId: j.parentJobId } : {}),

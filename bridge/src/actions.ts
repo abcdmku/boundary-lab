@@ -8,18 +8,31 @@
  *   updateDraft                ->  still "draft"
  *   launchJobs                 ->  "queued"  ->  queue.enqueue
  *   startGenerate / startSolve ->  create + launch in one step (the old path)
+ *   scheduleJobs               ->  move a not-yet-started job's target/order
  *   cancelJobs / deleteJob
+ *
+ * Structure owned by this module:
+ *
+ *   projects       — the design a mesh family and its solves belong to
+ *   mesh variants  — createMeshVariant(): same design, different params
+ *   plans          — createBatch(): N solves over M meshes, staged as drafts
+ *                    and then ARRANGED on the schedule board, which is where
+ *                    "when, where and in what order" is actually decided
  */
 import fs from "node:fs";
 import path from "node:path";
 import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as queue from "./queue.ts";
+import * as estimate from "./estimate.ts";
 import {
   blabctlSupportsServerUrl,
   getTarget,
   listTargets,
   normalizeTarget,
+  setTargetConfig,
+  assertTargetSlotsConfigurable,
+  targetIdOf,
   targetLabel,
   TargetError,
 } from "./targets.ts";
@@ -139,6 +152,111 @@ function refreshTargetForLaunch(job: store.Job) {
   requireTargetRunnable(store.getJob(job.id) ?? job);
 }
 
+// ---------- projects ----------
+
+/**
+ * Resolve a project reference the way every caller wants it: an id, else an
+ * existing project with that NAME, else a new one. An optimization campaign
+ * should not have to check whether its project exists before its first trial —
+ * but "cd90x60" on trial two must land in the same project as trial one, or
+ * twenty trials become twenty single-mesh projects. Matching is
+ * case-insensitive for the same reason.
+ */
+export function resolveProject(ref: string | undefined | null): store.Project | undefined {
+  const value = (ref ?? "").trim();
+  if (!value) return undefined;
+  const byId = store.getProject(value);
+  if (byId) return byId;
+  const lower = value.toLowerCase();
+  const byName = store.listProjects().find((p) => p.name.trim().toLowerCase() === lower);
+  return byName ?? store.createProject({ name: value });
+}
+
+function requireProject(id: string): store.Project {
+  const project = store.getProject(id);
+  if (!project) throw new ActionError(`unknown project ${id}`, 404);
+  return project;
+}
+
+export function createProject(input: { name?: string; goal?: string; color?: number }): store.Project {
+  const name = (input.name ?? "").trim();
+  if (!name) throw new ActionError("a project needs a name");
+  const existing = store
+    .listProjects()
+    .find((project) => project.name.trim().toLowerCase() === name.toLowerCase());
+  if (existing) {
+    // Project names are the idempotent human/agent reference. Creating the
+    // same spelling twice must not split one campaign into twin folders. A
+    // create of an archived name is best understood as restoring it.
+    return existing.archived
+      ? store.updateProject(existing.id, { archived: false })!
+      : existing;
+  }
+  return store.createProject({
+    name,
+    ...(input.goal ? { goal: input.goal } : {}),
+    ...(typeof input.color === "number" ? { color: input.color } : {}),
+  });
+}
+
+export function updateProject(
+  id: string,
+  patch: { name?: string; goal?: string | null; color?: number; archived?: boolean },
+): store.Project {
+  requireProject(id);
+  if (patch.name !== undefined && !String(patch.name).trim())
+    throw new ActionError("a project needs a name");
+  if (patch.name !== undefined) {
+    const wanted = String(patch.name).trim().toLowerCase();
+    const duplicate = store
+      .listProjects()
+      .find((project) => project.id !== id && project.name.trim().toLowerCase() === wanted);
+    if (duplicate)
+      throw new ActionError(`a project named "${duplicate.name}" already exists`, 409);
+  }
+  return store.updateProject(id, {
+    ...(patch.name !== undefined ? { name: String(patch.name).trim() } : {}),
+    ...(patch.goal !== undefined ? { goal: patch.goal } : {}),
+    ...(patch.color !== undefined ? { color: patch.color } : {}),
+    ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
+  })!;
+}
+
+/** Forget a project; its jobs survive, unassigned. */
+export function deleteProject(id: string): { unassigned: number } {
+  requireProject(id);
+  return { unassigned: store.removeProject(id) };
+}
+
+/**
+ * Move jobs into (or out of, with `null`) a project. Moving a MESH takes its
+ * solves and its variants with it — a design's geometry and the answers
+ * computed from it are one thing, and leaving the solves behind would produce
+ * exactly the orphaned-results view this rework exists to remove.
+ */
+export function assignProject(jobIds: string[], projectId: string | null): { moved: string[] } {
+  if (projectId !== null) requireProject(projectId);
+  const moved = new Set<string>();
+  const visit = (id: string) => {
+    const job = store.getJob(id);
+    if (!job || moved.has(id)) return;
+    moved.add(id);
+    store.updateJob(id, { projectId });
+    if (job.kind !== "mesh") return;
+    for (const solve of store.listSolvesOfMesh(id)) visit(solve.id);
+    for (const variant of store.listVariantsOfMesh(id)) visit(variant.id);
+  };
+  for (const id of jobIds) {
+    if (!store.getJob(id)) throw new ActionError(`unknown job ${id}`, 404);
+    visit(id);
+  }
+  return { moved: [...moved] };
+}
+
+/** The project a new solve should land in: whatever its mesh belongs to. */
+const projectOfMesh = (meshJobId: string): string | undefined =>
+  store.getJob(meshJobId)?.projectId;
+
 function solveParams(meshJobId: string, options?: SolveOptions): Record<string, unknown> {
   const opts = options ?? {};
   return {
@@ -178,17 +296,27 @@ export function startGenerate(input: {
   generator: string;
   name?: string;
   params?: Record<string, unknown>;
+  /** Project id, or a name to create one under. */
+  project?: string;
+  /** Mesh this one is a variant of — records the lineage. */
+  variantOf?: string;
   batchId?: string;
   workspace?: string;
   threadId?: string;
 }): store.Job {
   requireGenerator(input.generator);
+  const parent = input.variantOf ? requireMesh(input.variantOf) : undefined;
+  // A variant belongs to whatever its parent belongs to unless told otherwise:
+  // that is the whole point of calling it a variant.
+  const project = resolveProject(input.project)?.id ?? parent?.projectId;
   const job = store.createJob({
     kind: "mesh",
     name: input.name?.trim() || `${input.generator} mesh`,
     generator: input.generator,
     params: input.params ?? {},
     target: { type: "local" }, // meshing always runs on the bridge host
+    ...(project ? { projectId: project } : {}),
+    ...(parent ? { variantOf: parent.id } : {}),
     ...(input.batchId ? { batchId: input.batchId } : {}),
     ...(input.workspace ? { workspace: input.workspace } : {}),
     ...(input.threadId ? { threadId: input.threadId } : {}),
@@ -217,6 +345,8 @@ export function startSolve(input: {
     params: solveParams(input.meshJobId, input.options),
     target: jobTarget,
     parentJobId: input.meshJobId,
+    // A solve is an answer about a mesh, so it lives wherever that mesh lives.
+    ...(mesh.projectId ? { projectId: mesh.projectId } : {}),
     ...(input.batchId ? { batchId: input.batchId } : {}),
     ...(input.workspace ? { workspace: input.workspace } : {}),
     ...(input.threadId ? { threadId: input.threadId } : {}),
@@ -236,6 +366,10 @@ export interface DraftInput {
   meshJobId?: string;
   options?: SolveOptions;
   target?: unknown;
+  /** Project id, or a name to create one under. */
+  project?: string;
+  /** Mesh drafts only: the mesh this is a variant of. */
+  variantOf?: string;
   batchId?: string;
   batchName?: string;
   workspace?: string;
@@ -250,6 +384,8 @@ export function createDraft(input: DraftInput): store.Job {
   if (input.kind === "mesh") {
     const generator = String(input.generator ?? "");
     requireGenerator(generator);
+    const parent = input.variantOf ? requireMesh(input.variantOf) : undefined;
+    const project = resolveProject(input.project)?.id ?? parent?.projectId;
     return store.createJob({
       kind: "mesh",
       status: "draft",
@@ -257,6 +393,8 @@ export function createDraft(input: DraftInput): store.Job {
       generator,
       params: input.params ?? {},
       target: { type: "local" },
+      ...(project ? { projectId: project } : {}),
+      ...(parent ? { variantOf: parent.id } : {}),
       ...(input.batchId ? { batchId: input.batchId } : {}),
       ...(input.batchName ? { batchName: input.batchName } : {}),
       ...(input.workspace ? { workspace: input.workspace } : {}),
@@ -271,6 +409,7 @@ export function createDraft(input: DraftInput): store.Job {
   // A draft only needs the mesh to EXIST — it may still be queued/running; the
   // "done" requirement is enforced at launch, so you can stage solves ahead.
   const mesh = requireMesh(meshJobId);
+  const solveProject = resolveProject(input.project)?.id ?? mesh.projectId;
   return store.createJob({
     kind: "solve",
     status: "draft",
@@ -283,11 +422,63 @@ export function createDraft(input: DraftInput): store.Job {
     }),
     target: target(input.target),
     parentJobId: meshJobId,
+    ...(solveProject ? { projectId: solveProject } : {}),
     ...(input.batchId ? { batchId: input.batchId } : {}),
     ...(input.batchName ? { batchName: input.batchName } : {}),
     ...(input.workspace ? { workspace: input.workspace } : {}),
     ...(input.threadId ? { threadId: input.threadId } : {}),
   });
+}
+
+/**
+ * Derive a new mesh from an existing one: same generator, its params with an
+ * override applied, `variantOf` pointing back at it.
+ *
+ * This is the shape an optimization campaign produces trials in — twenty
+ * geometries that are the same design at twenty parameter settings — and doing
+ * it through one call is what makes them render as a lineage instead of twenty
+ * unrelated mesh jobs. `params` is a PATCH over the parent's params, because
+ * "the same but with a wider mouth" is what a variant actually is.
+ */
+export function createMeshVariant(input: {
+  meshJobId: string;
+  params?: Record<string, unknown>;
+  name?: string;
+  /** Launch it now instead of leaving a draft. */
+  launch?: boolean;
+  project?: string;
+  workspace?: string;
+  threadId?: string;
+}): store.Job {
+  const parent = requireMesh(input.meshJobId);
+  const generator = String(parent.generator ?? "");
+  requireGenerator(generator);
+  const params = { ...(parent.params ?? {}), ...(input.params ?? {}) };
+  // Name it after what CHANGED — "cd90 · throat=32" says more at a glance than
+  // "cd90 mesh (copy 3)", and the schedule board has no room for the latter.
+  const changed = Object.entries(input.params ?? {})
+    .filter(([key, value]) => String((parent.params ?? {})[key]) !== String(value))
+    .map(([key, value]) => `${key}=${value}`);
+  const base = parent.name.replace(/\s*·\s*[^·]*$/, "");
+  const name =
+    input.name?.trim() ||
+    (changed.length ? `${base} · ${changed.slice(0, 2).join(" ")}` : `${base} · variant`);
+
+  const project = resolveProject(input.project)?.id ?? parent.projectId;
+  const job = store.createJob({
+    kind: "mesh",
+    status: input.launch ? "queued" : "draft",
+    name,
+    generator,
+    params,
+    target: { type: "local" },
+    variantOf: parent.id,
+    ...(project ? { projectId: project } : {}),
+    ...(input.workspace ? { workspace: input.workspace } : {}),
+    ...(input.threadId ? { threadId: input.threadId } : {}),
+  });
+  if (input.launch) queue.enqueue(job.id);
+  return store.getJob(job.id)!;
 }
 
 /** Edit a draft. Anything but a draft is rejected — 409, not a silent no-op. */
@@ -360,6 +551,13 @@ export interface BatchInput {
   /** Display label for the whole batch; also the stem of each job's name. */
   name?: string;
   batchId?: string;
+  /**
+   * Project id, or a name to create one under. Solves default to their mesh's
+   * project; mesh batches default to a project named after the batch, because
+   * a sweep of meshes IS a family of variants and hiding that was the old
+   * model's mistake.
+   */
+  project?: string;
   /** Launch every created job immediately instead of leaving drafts. */
   launch?: boolean;
   /** Default execution target for every variant that does not override it. */
@@ -451,6 +649,15 @@ export function createBatch(input: BatchInput): BatchResult {
   const baseOptions = input.options ?? {};
   const baseParams = input.params ?? {};
 
+  // A mesh sweep is a variant family: give it a project (named after the batch
+  // when the caller did not name one) and hang every variant off the first one.
+  const explicitProject = resolveProject(input.project)?.id;
+  const meshProject =
+    input.kind === "mesh"
+      ? (explicitProject ?? resolveProject(batchName ?? `${input.generator} sweep`)?.id)
+      : explicitProject;
+  let variantRoot: string | undefined;
+
   const jobs: store.Job[] = [];
   for (const meshId of meshIds) {
     const mesh = input.kind === "solve" ? store.getJob(meshId) : undefined;
@@ -472,6 +679,9 @@ export function createBatch(input: BatchInput): BatchResult {
               generator: String(input.generator),
               params: { ...baseParams, ...((variant.params ?? {}) as Record<string, unknown>) },
               target: { type: "local" },
+              ...(meshProject ? { projectId: meshProject } : {}),
+              // First mesh of the sweep is the root; the rest are its variants.
+              ...(variantRoot ? { variantOf: variantRoot } : {}),
               batchId,
               ...(batchName ? { batchName } : {}),
               ...(input.workspace ? { workspace: input.workspace } : {}),
@@ -484,11 +694,15 @@ export function createBatch(input: BatchInput): BatchResult {
               params: solveParams(meshId, { ...baseOptions, ...readSolveOptions(variant) }),
               target: variantTargets[i]!,
               parentJobId: meshId,
+              ...(explicitProject ?? projectOfMesh(meshId)
+                ? { projectId: (explicitProject ?? projectOfMesh(meshId))! }
+                : {}),
               batchId,
               ...(batchName ? { batchName } : {}),
               ...(input.workspace ? { workspace: input.workspace } : {}),
               ...(input.threadId ? { threadId: input.threadId } : {}),
             });
+      if (input.kind === "mesh" && !variantRoot) variantRoot = job.id;
       jobs.push(job);
     });
   }
@@ -596,6 +810,179 @@ export function launchJobs(selector: JobSelector): LaunchResult {
     });
   }
   return result;
+}
+
+export interface HoldResult {
+  held: { jobId: string; name: string }[];
+  skipped: { jobId: string; reason: string }[];
+}
+
+/**
+ * Put queued-but-not-started jobs back on the shelf as drafts. The undo for a
+ * launch, and what dragging a card out of a lane does — the configuration
+ * survives, so a sweep aimed at the wrong box is a correction, not a rebuild.
+ */
+export function holdJobs(selector: JobSelector): HoldResult {
+  const result: HoldResult = { held: [], skipped: [] };
+  for (const job of selectJobs(selector)) {
+    if (job.status === "draft") continue; // already held; not an error
+    if (job.status !== "queued" || queue.isRunning(job.id)) {
+      result.skipped.push({
+        jobId: job.id,
+        reason: job.status === "running" ? "already running — cancel it instead" : `job is ${job.status}`,
+      });
+      continue;
+    }
+    queue.removeQueued(job.id);
+    if (!store.markDraft(job.id)) {
+      result.skipped.push({ jobId: job.id, reason: "started before it could be held" });
+      continue;
+    }
+    result.held.push({ jobId: job.id, name: job.name });
+  }
+  return result;
+}
+
+// ---------- the schedule board's write path ----------
+
+/** The backlog column: configured work that has not been handed to a lane. */
+export const PLANNED_COLUMN = "planned";
+
+export interface ScheduleMove {
+  jobId: string;
+  /**
+   * Where the card was dropped: PLANNED_COLUMN to hold it as a draft, or a
+   * compute target id to run it there.
+   */
+  column: string;
+  /** 0-based index within that column's waiting line. Omit to append. */
+  position?: number;
+}
+
+export interface ScheduleResult {
+  moved: { jobId: string; column: string; lane: string; queuePosition: number }[];
+  skipped: { jobId: string; reason: string }[];
+}
+
+/**
+ * Apply drag-and-drop moves: this is the ONE write path behind the schedule
+ * board, and it is deliberately per-card rather than "here is the whole board"
+ * — two people (or an agent and a person) rearranging at once should merge,
+ * not have the last full-board snapshot silently undo the other's move.
+ *
+ * A move never destroys work. Dropping onto a target launches; dropping back
+ * onto the backlog holds. Running jobs refuse to move, with the reason.
+ */
+export function scheduleJobs(moves: ScheduleMove[]): ScheduleResult {
+  const result: ScheduleResult = { moved: [], skipped: [] };
+  for (const move of moves) {
+    const job = store.getJob(move.jobId);
+    if (!job) throw new ActionError(`unknown job ${move.jobId}`, 404);
+    const skip = (reason: string) => result.skipped.push({ jobId: job.id, reason });
+
+    if (store.TERMINAL.has(job.status)) {
+      skip(`already ${job.status}`);
+      continue;
+    }
+    if (job.status === "running" || queue.isRunning(job.id)) {
+      skip("running — it is already on a machine");
+      continue;
+    }
+
+    // ---- back to the backlog ----
+    if (move.column === PLANNED_COLUMN) {
+      if (job.status === "queued") {
+        queue.removeQueued(job.id);
+        store.markDraft(job.id);
+      }
+      orderDrafts(job.id, move.position);
+      result.moved.push({ jobId: job.id, column: PLANNED_COLUMN, lane: "", queuePosition: 0 });
+      continue;
+    }
+
+    // ---- onto a machine ----
+    let jobTarget: store.JobTarget;
+    try {
+      jobTarget = target(move.column);
+    } catch (err) {
+      skip(err instanceof Error ? err.message : String(err));
+      continue;
+    }
+    if (job.kind === "mesh" && jobTarget.type !== "local") {
+      skip("mesh generation always runs on the bridge host");
+      continue;
+    }
+
+    if (job.status === "draft") {
+      store.updateJob(job.id, { target: jobTarget });
+      const launched = launchJobs({ jobIds: [job.id] });
+      if (launched.skipped.length > 0) {
+        skip(launched.skipped[0]!.reason);
+        continue;
+      }
+      if (move.position !== undefined) queue.moveWithinLane(job.id, move.position);
+    } else if (!queue.retarget(job.id, jobTarget, move.position)) {
+      skip("could not be moved");
+      continue;
+    }
+    result.moved.push({
+      jobId: job.id,
+      column: move.column,
+      lane: queue.laneOf(job.id) ?? "",
+      queuePosition: queue.queuePosition(job.id),
+    });
+  }
+  return result;
+}
+
+/** Place a draft at `position` among all drafts, by rewriting priorities. */
+function orderDrafts(jobId: string, position?: number) {
+  const drafts = store
+    .listJobs()
+    .filter((j) => j.status === "draft")
+    .sort((a, b) => store.priorityOf(a) - store.priorityOf(b))
+    .map((j) => j.id)
+    .filter((id) => id !== jobId);
+  const at = position === undefined ? drafts.length : Math.max(0, Math.min(position, drafts.length));
+  drafts.splice(at, 0, jobId);
+  // Numbered from the backlog base, not from zero: the backlog's own order
+  // matters, but a held job must not cut ahead of a lane when it is launched.
+  store.reorderPriorities(drafts, store.BACKLOG_PRIORITY_BASE);
+}
+
+/** Rewrite a whole lane's waiting order — the multi-card drop. */
+export function reorderLane(laneKey: string, jobIds: string[]): { order: string[] } {
+  if (!laneKey) throw new ActionError("laneKey is required");
+  return { order: queue.reorderLane(laneKey, jobIds) };
+}
+
+/**
+ * Set how many solves a target runs at once, and (locally) which GPU each slot
+ * gets. Raising the local count past 1 is allowed and warned about, never
+ * silently ignored — see targets.setTargetConfig.
+ */
+export function setTargetSlots(
+  targetId: string,
+  patch: { slots?: number | null; devices?: string[] | null },
+): { target: ReturnType<typeof listTargets>[number] | undefined; warning: string | null } {
+  const existing = getTarget(targetId);
+  if (!existing) throw new ActionError(`unknown target ${targetId}`, 404);
+  try {
+    assertTargetSlotsConfigurable(existing, patch);
+    setTargetConfig(targetId, patch);
+  } catch (err) {
+    if (err instanceof TargetError) throw new ActionError(err.message, err.status);
+    throw err;
+  }
+  const updated = getTarget(targetId);
+  const devices = updated?.devices ?? [];
+  const warning =
+    updated && updated.concurrency > 1 && devices.length < updated.concurrency
+      ? `${updated.label} will run ${updated.concurrency} solves at once on the same device — ` +
+        `they share VRAM, so a mesh that fits alone may fail here. Pin one device per slot, ` +
+        `or keep the slot count at 1.`
+      : null;
+  return { target: updated, warning };
 }
 
 export interface CancelResult {
@@ -859,12 +1246,29 @@ export function rescanJob(id: string): store.Job {
 export function fullState() {
   const gens = generatorsCache();
   const vastKey = describeVastKey();
+  const jobs = store.listJobs();
+  // One history scan for the whole snapshot: every card on the schedule board
+  // wants a duration, and rebuilding the sample pool per card would turn an
+  // O(jobs) render into O(jobs^2).
+  const pool = estimate.historySamples();
+  const targets = listTargets();
   return {
     generators: gens.generators,
     generatorsError: gens.error ?? null,
-    jobs: store.listJobs(),
+    jobs,
+    projects: store.listProjects(),
     queue: queue.queueSnapshot(),
-    targets: listTargets(),
+    targets: targets.map((t) => ({ ...t, throughput: estimate.targetThroughput(t.id) })),
+    /**
+     * Per-job time estimates, keyed by job id — for everything not yet
+     * finished, including the drafts sitting in the backlog column that have
+     * no lane to be forecast in.
+     */
+    estimates: Object.fromEntries(
+      jobs
+        .filter((j) => !store.TERMINAL.has(j.status))
+        .map((j) => [j.id, estimate.estimateJob(j, pool)]),
+    ),
     batches: listBatches(),
     t3: { configured: t3Configured() },
     publicUrl: config.publicUrl,

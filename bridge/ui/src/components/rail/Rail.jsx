@@ -20,7 +20,7 @@ export function Rail({ generators, generatorsError, api, refetch, onNewMesh, onS
   };
 
   return (
-    <aside className="sticky top-12 h-[calc(100vh-3rem)] w-70 shrink-0 overflow-y-auto border-r border-border p-4">
+    <aside className="generator-rail sticky top-12 h-[calc(100vh-3rem)] w-70 shrink-0 overflow-y-auto border-r border-border p-4">
       <div className="mb-2 flex items-center gap-2">
         <span className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
           Generators

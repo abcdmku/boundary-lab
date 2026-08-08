@@ -1,8 +1,8 @@
 """Unit tests for the slot_cd_horn section family and quadrant loft.
 
 Pure numpy: no gmsh/GPU. Covers clip widths, symmetry-plane pinning,
-watertightness invariants of the mirrored mesh, and the closed-form
-triangle-count estimate (~7.6k at defaults).
+watertightness invariants of the mirrored mesh, and the exact topology-only
+triangle-count estimate (8,832 at defaults).
 """
 
 from __future__ import annotations
@@ -56,6 +56,15 @@ class TestClippedCircleQuadrant:
         radii = np.linalg.norm(out, axis=1)
         assert np.all(radii <= 80.0 + 1e-9)
         assert out[-1, 1] == 80.0
+
+    def test_clipped_preserves_the_chord_circle_feature_vertex(self):
+        chord, arc = sections.clipped_circle_quadrant_patches(80.0, 10.0, 16)
+        corner = np.array([10.0, np.sqrt(80.0**2 - 10.0**2)])
+        assert np.array_equal(chord[-1], corner)
+        assert np.array_equal(arc[0], corner)
+        assert (len(chord) - 1) + (len(arc) - 1) == 16
+        combined = sections.clipped_circle_quadrant(80.0, 10.0, 17)
+        assert np.any(np.all(combined == corner, axis=1))
 
     def test_degenerate_clip_is_ridge_on_x0(self):
         out = sections.clipped_circle_quadrant(56.0, 0.0, 17)
@@ -183,6 +192,22 @@ class TestWatertightness:
         open_edges = [edge for edge, count in counts.items() if count == 1]
         assert open_edges == []
 
+    def test_flare_mouth_station_is_exact_to_keep_lip_seam_closed(self):
+        # For these otherwise ordinary dimensions, reconstructing the terminal
+        # blend fraction from z lands one ulp away from 1.0.  The mouth must be
+        # inserted directly or its offset normal differs from the lip's and the
+        # two surfaces leave an unfused seam.
+        points, triangles = build_full(
+            {
+                "plug": False,
+                "throat_diameter": 20,
+                "wall_angle_deg": 18,
+                "slot_length": 130,
+            }
+        )
+        counts = edge_use_counts(triangles)
+        assert all(count != 1 for count in counts.values())
+
     def test_shell_nonmanifold_only_at_throat_ring(self):
         # The shell back closes onto the throat rim circle (axisym_horn precedent):
         # every over-shared edge must lie exactly on that circle, and nowhere else.
@@ -206,15 +231,44 @@ class TestWatertightness:
         areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
         assert areas.min() > 1e-9
 
-    def test_driven_annulus_area(self):
-        # Driven quadrant area ~ quarter annulus between plug base (r=9) and throat (r=18).
-        points, triangles, tags = horn.build_quadrant({})
+    @pytest.mark.parametrize("plug", [True, False])
+    def test_driven_surface_is_the_full_driver_disc(self, plug):
+        points, triangles, tags = horn.build_quadrant({"plug": plug})
         driven = triangles[tags == horn.DRIVEN_TAG]
         v0, v1, v2 = (points[driven[:, i]] for i in range(3))
         area = float(np.sum(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)))
-        expected = np.pi * (18.0**2 - 9.0**2) / 4.0
+        expected = np.pi * 18.0**2 / 4.0
         assert abs(area - expected) / expected < 0.02
         assert np.allclose(np.vstack((v0, v1, v2))[:, 2], 0.0)  # all on the throat plane
+
+    def test_phase_plug_is_a_separate_capped_body_in_front_of_the_source(self):
+        points, triangles = build_full({})
+        # Main shell/source plus the independently closed phase plug.
+        vertex_to_triangles: dict[int, list[int]] = {}
+        for triangle_index, triangle in enumerate(triangles):
+            for vertex in triangle:
+                vertex_to_triangles.setdefault(int(vertex), []).append(triangle_index)
+        seen: set[int] = set()
+        components: list[int] = []
+        for seed in range(len(triangles)):
+            if seed in seen:
+                continue
+            stack = [seed]
+            seen.add(seed)
+            size = 0
+            while stack:
+                current = stack.pop()
+                size += 1
+                for vertex in triangles[current]:
+                    for neighbor in vertex_to_triangles[int(vertex)]:
+                        if neighbor not in seen:
+                            seen.add(neighbor)
+                            stack.append(neighbor)
+            components.append(size)
+        assert len(components) == 2
+        # The plug's rigid base cap is exactly at the configured clearance.
+        base_z = horn.SCHEMA["params"]["properties"]["plug_base_clearance"]["default"]
+        assert np.any(np.all(np.isclose(points[triangles][:, :, 2], base_z), axis=1))
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +295,10 @@ class TestValidation:
         with pytest.raises(ValueError, match="plug_tip_margin leaves no room"):
             horn.build_quadrant({"plug_tip_margin": 70})
 
+    def test_plug_base_clearance_leaves_room_for_the_plug(self):
+        with pytest.raises(ValueError, match="plug_base_clearance and plug_tip_margin leave no room"):
+            horn.build_quadrant({"plug_base_clearance": 50})
+
     def test_plug_gap_seals_channels(self):
         with pytest.raises(ValueError, match="plug_gap seals the plug channels"):
             horn.build_quadrant({"plug_gap": 25, "plug_tip_margin": 2, "slot_width": 8})
@@ -261,6 +319,37 @@ class TestValidation:
         # A slightly larger squarer mouth contains the slot and builds fine.
         horn.build_quadrant({"mouth_width": 40, "mouth_height": 180, "mouth_superellipse_n": 8})
 
+    def test_flare_mesh_correspondence_must_not_contract(self):
+        with pytest.raises(ValueError, match="mouth-to-slot mesh correspondence would contract"):
+            horn.build_quadrant(
+                {
+                    "throat_diameter": 60,
+                    "wall_angle_deg": 40,
+                    "slot_width": 65,
+                    "slot_length": 240,
+                    "slice_angle_deg": 30,
+                    "mouth_width": 72,
+                    "mouth_height": 700,
+                    "mouth_superellipse_n": 3,
+                    "flare_depth": 130,
+                    "plug": False,
+                }
+            )
+
+    def test_enclosure_must_clear_the_adapter_bulge(self):
+        with pytest.raises(ValueError, match="enclosure is narrower than the circular-to-slot adapter bulge"):
+            horn.build_quadrant(
+                {
+                    "wall_angle_deg": 20,
+                    "slice_angle_deg": 60,
+                    "mouth_width": 80,
+                    "mouth_height": 240,
+                    "back": "enclosure",
+                    "enclosure_margin": 5,
+                    "plug": False,
+                }
+            )
+
     def test_angular_segments_must_be_multiple_of_four(self):
         with pytest.raises(ValueError, match="angular_segments must be a multiple of 4"):
             horn.build_quadrant({"angular_segments": 19})
@@ -276,9 +365,10 @@ class TestValidation:
 
 
 class TestTriangleEstimate:
-    def test_default_estimate_near_7600(self):
+    def test_default_estimate_stays_below_the_iteration_limit(self):
         estimate = horn.estimate_triangles({})
-        assert abs(estimate - 7600) <= 400  # ~7.6k at defaults, inside the 9k iteration rule
+        assert estimate == 8832
+        assert estimate < 9000
 
     @pytest.mark.parametrize(
         "params",
@@ -397,6 +487,21 @@ class TestBboxEstimate:
             "wall_thickness": 6,
         }
         assert horn.estimate_bbox_mm(params) == pytest.approx([470.0, 320.0, 218.105], abs=1e-3)
+
+    def test_adapter_bulge_can_set_the_outer_width(self):
+        params = {
+            "wall_angle_deg": 20,
+            "slice_angle_deg": 60,
+            "mouth_width": 80,
+            "mouth_height": 240,
+            "mouth_superellipse_n": 8,
+            "plug": False,
+            "mouth_roundover": 0,
+        }
+        estimated = horn.estimate_bbox_mm(params)
+        assert estimated == pytest.approx(built_bbox(params), abs=1e-6)
+        assert estimated[0] == pytest.approx(147.68925512662975)
+        assert estimated[0] > params["mouth_width"] + 2 * 6  # mouth + shell thickness was the old underestimate
 
     def test_margin_is_roundover_at_quarter_round(self):
         params = {"mouth_roundover": 25, "roundover_sweep_deg": 90, "wall_thickness": 6}

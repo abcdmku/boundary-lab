@@ -12,12 +12,14 @@
  *   GET    /api/state
  *   POST   /api/generators/refresh
  *   GET    /api/targets
+ *   PATCH  /api/targets/:id               slot count / GPU pinning
  *   POST   /api/generate                  launch a mesh job now
  *   POST   /api/solve                     launch a solve job now
  *   GET    /api/jobs                      list (filterable)
  *   POST   /api/jobs                      create ONE draft
  *   POST   /api/jobs/batch                create a sweep (optionally launched)
  *   POST   /api/jobs/launch               launch drafts by ids and/or batchId
+ *   POST   /api/jobs/hold                 queued -> draft (the undo for launch)
  *   POST   /api/jobs/cancel               cancel by ids and/or batchId
  *   GET    /api/jobs/:id
  *   PATCH  /api/jobs/:id                  edit a draft
@@ -25,6 +27,14 @@
  *   POST   /api/jobs/:id/launch
  *   POST   /api/jobs/:id/cancel
  *   POST   /api/jobs/:id/rescan
+ *   POST   /api/jobs/:id/variant          derive a new mesh from this mesh
+ *   GET    /api/projects
+ *   POST   /api/projects
+ *   PATCH  /api/projects/:id
+ *   DELETE /api/projects/:id              unassigns its jobs, never deletes them
+ *   POST   /api/projects/assign           move jobs between projects
+ *   POST   /api/schedule                  drag-and-drop moves (the board)
+ *   POST   /api/schedule/lane             rewrite one lane's waiting order
  *   GET    /api/batches
  *   GET    /api/batches/:batchId
  *   POST   /api/batches/:batchId/launch
@@ -134,6 +144,24 @@ app.get("/api/targets", (_req, res) => {
   res.json({ targets: listTargets() });
 });
 
+/**
+ * How many solves this target runs at once, and which GPU each slot gets.
+ * `{ slots: null }` / `{ devices: null }` clears an override.
+ */
+app.patch("/api/targets/:id", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.setTargetSlots(req.params.id, {
+      ...(body.slots !== undefined
+        ? { slots: body.slots === null ? null : Number(body.slots) }
+        : {}),
+      ...(body.devices !== undefined
+        ? { devices: body.devices === null ? null : asStringArray(body.devices, "devices") ?? null }
+        : {}),
+    }),
+  );
+});
+
 app.post("/api/generate", (req, res) => {
   const { generator, name, params, batchId } = req.body ?? {};
   if (typeof generator !== "string")
@@ -143,6 +171,8 @@ app.post("/api/generate", (req, res) => {
       generator,
       name,
       params: asObject(params, "params"),
+      ...(typeof req.body?.project === "string" ? { project: req.body.project } : {}),
+      ...(typeof req.body?.variantOf === "string" ? { variantOf: req.body.variantOf } : {}),
       ...(typeof batchId === "string" ? { batchId } : {}),
     }),
   );
@@ -192,6 +222,8 @@ app.post("/api/jobs", (req, res) => {
       ...(typeof body.meshJobId === "string" ? { meshJobId: body.meshJobId } : {}),
       options: actions.readSolveOptions(body),
       target: body.target,
+      ...(typeof body.project === "string" ? { project: body.project } : {}),
+      ...(typeof body.variantOf === "string" ? { variantOf: body.variantOf } : {}),
       ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
       ...(typeof body.batchName === "string" ? { batchName: body.batchName } : {}),
     }),
@@ -211,6 +243,7 @@ app.post("/api/jobs/batch", (req, res) => {
       ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
       launch: body.launch === true,
       target: body.target,
+      ...(typeof body.project === "string" ? { project: body.project } : {}),
       ...(typeof body.meshJobId === "string" ? { meshJobId: body.meshJobId } : {}),
       ...(asStringArray(body.meshJobIds, "meshJobIds")
         ? { meshJobIds: asStringArray(body.meshJobIds, "meshJobIds") }
@@ -245,8 +278,33 @@ app.post("/api/jobs/cancel", (req, res) => {
   );
 });
 
+/** Queued -> draft. Undoes a launch without destroying the configuration. */
+app.post("/api/jobs/hold", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.holdJobs({
+      ...(asStringArray(body.jobIds, "jobIds") ? { jobIds: asStringArray(body.jobIds, "jobIds") } : {}),
+      ...(typeof body.batchId === "string" ? { batchId: body.batchId } : {}),
+    }),
+  );
+});
+
 app.post("/api/jobs/:id/launch", (req, res) => {
   guard(res, () => actions.launchJobs({ jobIds: [req.params.id] }));
+});
+
+/** Derive a new mesh from this one — same generator, patched params. */
+app.post("/api/jobs/:id/variant", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.createMeshVariant({
+      meshJobId: req.params.id,
+      params: asObject(body.params, "params"),
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.project === "string" ? { project: body.project } : {}),
+      launch: body.launch === true,
+    }),
+  );
 });
 
 app.post("/api/jobs/:id/cancel", (req, res) => {
@@ -288,6 +346,80 @@ app.get("/api/jobs/:id", (req, res) => {
   const job = store.getJob(req.params.id);
   if (!job) return res.status(404).json({ error: `unknown job ${req.params.id}` });
   res.json({ ...job, lane: queue.laneOf(job.id), queuePosition: queue.queuePosition(job.id) });
+});
+
+// ----- projects: the design a mesh family and its solves belong to -----
+app.get("/api/projects", (_req, res) => {
+  res.json({ projects: store.listProjects() });
+});
+
+app.post("/api/projects", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.createProject({
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.goal === "string" ? { goal: body.goal } : {}),
+      ...(body.color !== undefined ? { color: Number(body.color) } : {}),
+    }),
+  );
+});
+
+app.patch("/api/projects/:id", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () =>
+    actions.updateProject(req.params.id, {
+      ...(body.name !== undefined ? { name: String(body.name) } : {}),
+      ...(body.goal !== undefined ? { goal: body.goal === null ? null : String(body.goal) } : {}),
+      ...(body.color !== undefined ? { color: Number(body.color) } : {}),
+      ...(body.archived !== undefined ? { archived: body.archived === true } : {}),
+    }),
+  );
+});
+
+app.delete("/api/projects/:id", (req, res) => {
+  guard(res, () => actions.deleteProject(req.params.id));
+});
+
+/** Move jobs into a project (or out of every project with projectId: null). */
+app.post("/api/projects/assign", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () => {
+    const jobIds = asStringArray(body.jobIds, "jobIds") ?? [];
+    if (jobIds.length === 0) throw new actions.ActionError("jobIds is required");
+    if (body.projectId !== null && typeof body.projectId !== "string")
+      throw new actions.ActionError("projectId must be a string, or null to unassign");
+    return actions.assignProject(jobIds, body.projectId as string | null);
+  });
+});
+
+// ----- the schedule board -----
+/** Drag-and-drop: [{ jobId, column, position }] where column is a target id
+ *  or "planned". One card per entry so concurrent edits merge. */
+app.post("/api/schedule", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () => {
+    const raw = Array.isArray(body.moves) ? body.moves : [body];
+    const moves = raw.map((entry) => {
+      const move = (entry ?? {}) as Record<string, unknown>;
+      if (typeof move.jobId !== "string" || typeof move.column !== "string")
+        throw new actions.ActionError("each move needs { jobId, column }");
+      return {
+        jobId: move.jobId,
+        column: move.column,
+        ...(move.position !== undefined ? { position: Number(move.position) } : {}),
+      };
+    });
+    return actions.scheduleJobs(moves);
+  });
+});
+
+/** Rewrite one lane's whole waiting order in a single request. */
+app.post("/api/schedule/lane", (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  guard(res, () => {
+    if (typeof body.laneKey !== "string") throw new actions.ActionError("laneKey is required");
+    return actions.reorderLane(body.laneKey, asStringArray(body.jobIds, "jobIds") ?? []);
+  });
 });
 
 // ----- batches -----

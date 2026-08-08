@@ -43,6 +43,17 @@
 .mesh-editor__name {
   max-width: 200px;
 }
+.mesh-editor__design {
+  max-width: 170px;
+}
+/* Variant mode: what this edit actually changes, next to the controls that
+   commit it — the thing you check before pressing Generate. */
+.mesh-editor__delta {
+  overflow: hidden;
+  max-width: 340px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .mesh-editor__overlay {
   position: absolute;

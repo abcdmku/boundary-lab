@@ -1,51 +1,14 @@
-/* Job board styles as plain CSS. The tailwind v4 dev toolchain in this
-   repo intermittently fails to emit utilities (documented in index.css —
-   confirmed here for `gap-3`, `w-full`, `aspect-[4/3]`, arbitrary grid
-   templates, text sizes, and more), so everything layout- or
-   theme-critical for the job board lives here, referencing the same
-   design tokens. 4px grid throughout. */
+/* Job styles as plain CSS. The tailwind v4 dev toolchain in this repo
+   intermittently fails to emit utilities (documented in index.css — confirmed
+   here for `gap-3`, `w-full`, `aspect-[4/3]`, arbitrary grid templates, text
+   sizes, and more), so everything layout- or theme-critical lives here,
+   referencing the same design tokens. 4px grid throughout.
 
-/* ---- board column ---- */
-.job-board {
-  flex: 1 1 0%;
-  min-width: 0;
-  max-width: 940px;
-  padding: 16px 24px 48px;
-}
+   These are the shared job pieces — status dot, essentials line, detail tabs,
+   actions — used by the designs view, the schedule board and JobDialog. The
+   flat job board they were written for is gone; nothing here draws a list. */
 
-/* ---- board header: title, counts, the two creation entry points ---- */
-.board-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.board-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: var(--muted-foreground);
-}
-.board-count {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
-}
-.board-head-actions {
-  margin-left: auto;
-  display: flex;
-  gap: 6px;
-}
-
-/* ---- filters ---- */
-.board-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-}
+/* ---- filter chips (designs view) ---- */
 .filter-set {
   display: inline-flex;
   gap: 2px;
@@ -84,68 +47,6 @@
   outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
-.board-filters > .filter-chip {
-  border-color: var(--border);
-  border-radius: 9px;
-  height: 26px;
-}
-.board-search {
-  width: auto !important;
-  min-width: 140px;
-  flex: 1 1 140px;
-  height: 26px !important;
-}
-
-/* ---- bulk selection bar ---- */
-.selection-bar {
-  position: sticky;
-  top: 48px;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--primary) 10%, var(--card));
-  font-size: 12.5px;
-}
-
-/* ---- per-row selection checkbox ---- */
-.job-select-slot {
-  display: flex;
-  height: 20px;
-  flex-shrink: 0;
-  align-items: center;
-}
-.job-select-slot input {
-  accent-color: var(--primary);
-  cursor: pointer;
-}
-
-/* ---- row card ---- */
-.job-card {
-  width: 100%;
-  margin-bottom: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--card);
-}
-.job-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-.job-head:hover {
-  background: var(--accent);
-}
-
-/* status dot: fixed-height slot pins it to the first line, centered
-   against the job name even when the row wraps to two lines */
 .job-dot-slot {
   display: flex;
   height: 20px;
@@ -269,16 +170,8 @@
 /* ---- row actions: invisible until row hover / keyboard focus ---- */
 .job-actions {
   display: flex;
-  flex-shrink: 0;
-  align-self: center;
+  align-items: center;
   gap: 4px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.job-head:hover .job-actions,
-.job-actions:focus-within,
-.job-actions--armed {
-  opacity: 1;
 }
 .job-action-btn {
   display: inline-flex;
@@ -359,6 +252,20 @@
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
 }
+.plot-open {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: zoom-in;
+}
+.plot-open:focus-visible,
+.mesh-preview-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
 .plot-thumb {
   display: block;
   width: 100%;
@@ -369,7 +276,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
-  cursor: zoom-in;
+  cursor: inherit;
 }
 
 /* ---- mesh viewer ---- */
@@ -402,6 +309,16 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
+  cursor: zoom-in;
+}
+.mesh-preview-button {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
   cursor: zoom-in;
 }
 
@@ -444,7 +361,7 @@
 .lightbox-overlay {
   position: fixed;
   inset: 0;
-  z-index: 30;
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -453,6 +370,7 @@
   cursor: zoom-out;
 }
 .lightbox-frame {
+  position: relative;
   display: flex;
   max-width: 90vw;
   max-height: 85vh;
@@ -461,9 +379,46 @@
   border-radius: 10px;
   background: #fff;
 }
+.lightbox-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  z-index: 1;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 50%;
+  background: rgb(18 18 18 / 92%);
+  color: #fff;
+  cursor: pointer;
+}
+.lightbox-close:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
 .lightbox-frame img {
   display: block;
   max-width: calc(90vw - 12px);
   max-height: calc(85vh - 12px);
   object-fit: contain;
+}
+
+/* ---- JobDialog: the detail panel, promoted out of an expanding row ---- */
+.job-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.job-dialog .job-detail {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.job-dialog-sub {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
 }

@@ -6,6 +6,7 @@ import { validateParams } from "../forms/SchemaForm.jsx";
 import { ParamRail } from "./ParamRail.jsx";
 import { MeshViewer } from "./MeshViewer.jsx";
 import { apiCall, json } from "../../lib/api";
+import { paramDelta } from "../../lib/board";
 import { fmtBytes, fmtInt } from "../../lib/format";
 import "./meshEditor.css";
 
@@ -46,21 +47,44 @@ function Stat({ label, value, title }) {
  * This replaces the old fire-and-inspect dialog, where the only way to see a
  * mesh was to run a job and open its Mesh tab. The loop behind it is
  * POST /api/preview (see bridge/src/preview.ts) — a warm python worker outside
- * the job queue, ~0.2 s per render — so nothing here creates a board row until
- * you actually ask for one.
+ * the job queue, ~0.2 s per render — so nothing reaches the ledger until you
+ * actually ask for it.
  *
- * Two exits, unchanged from the dialog it replaces, because they still mean
- * different things: "Save draft" parks a configured-but-unstarted job on the
- * board (stage ten meshes before running any), "Generate now" runs it. Meshing
- * always runs on the bridge host, so there is no target picker.
+ * Passing `variantOf` switches it into VARIANT mode: the generator is fixed to
+ * the parent's, the parent's params are the starting point, and only what you
+ * change is sent. That is what an optimization step actually is, and going
+ * through this path is what makes the result render as part of the parent's
+ * lineage instead of an unrelated twenty-first mesh. The live preview is worth
+ * more here than anywhere else — a variant is defined by a handful of edits,
+ * and this is the first time you can see what they do before spending a job.
+ *
+ * Two exits, because they mean different things: "Save draft" parks a
+ * configured-but-unstarted job on the schedule board's backlog, while
+ * "Generate now" is the one-step path. Meshing always runs on the bridge host,
+ * so there is no target picker.
  */
-export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClose, onCreated }) {
+export function MeshEditor({
+  generators,
+  initialGeneratorId,
+  initialProjectId,
+  variantOf,
+  projects,
+  api,
+  refetch,
+  onClose,
+  onCreated,
+}) {
   const list = generators || [];
+  const isVariant = !!variantOf;
   const [generatorId, setGeneratorId] = useState(
-    initialGeneratorId || (list[0] ? list[0].id : ""),
+    () => variantOf?.generator || initialGeneratorId || (list[0] ? list[0].id : ""),
   );
   const [name, setName] = useState("");
-  const [params, setParams] = useState({});
+  // In variant mode the parent's params ARE the form's starting values, so the
+  // viewport opens on the parent's geometry and every edit is visible both as a
+  // delta and as a change in the mesh.
+  const [params, setParams] = useState(() => ({ ...(variantOf?.params || {}) }));
+  const [projectId, setProjectId] = useState(() => variantOf?.projectId || initialProjectId || "");
   const [busy, setBusy] = useState(null);
 
   const [preview, setPreview] = useState(null);
@@ -82,6 +106,13 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
   const schema = generator?.params;
   const errors = useMemo(() => validateParams(schema, params), [schema, params]);
   const invalid = Object.keys(errors).length > 0;
+  const delta = useMemo(
+    () => (isVariant ? paramDelta(variantOf.params, params) : []),
+    [isVariant, variantOf, params],
+  );
+  // A variant with no edits is not a variant. The preview still renders it, so
+  // you can look at the parent before deciding what to change.
+  const nothingToSubmit = isVariant && delta.length === 0;
 
   // JSON, not the object identity: SchemaForm rebuilds `params` on every
   // keystroke, and re-rendering identical geometry is the one thing this loop
@@ -157,18 +188,35 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
   }, [sessionId]);
 
   const submit = async (mode) => {
-    if (invalid) return;
+    if (invalid || nothingToSubmit) return;
     setBusy(mode);
     try {
-      const body = {
-        generator: generatorId,
-        ...(name.trim() ? { name: name.trim() } : {}),
-        params,
-      };
-      const created =
-        mode === "draft"
-          ? await api("/api/jobs", json("POST", { kind: "mesh", ...body }))
-          : await api("/api/generate", json("POST", body));
+      let created;
+      if (isVariant) {
+        // Only the delta travels: the server merges it over the parent's
+        // params, so a parameter the parent later gains is not silently pinned
+        // to whatever this form happened to show.
+        created = await api(
+          `/api/jobs/${variantOf.id}/variant`,
+          json("POST", {
+            params: Object.fromEntries(delta),
+            ...(name.trim() ? { name: name.trim() } : {}),
+            ...(projectId ? { project: projectId } : {}),
+            launch: mode === "now",
+          }),
+        );
+      } else {
+        const body = {
+          generator: generatorId,
+          ...(name.trim() ? { name: name.trim() } : {}),
+          ...(projectId ? { project: projectId } : {}),
+          params,
+        };
+        created =
+          mode === "draft"
+            ? await api("/api/jobs", json("POST", { kind: "mesh", ...body }))
+            : await api("/api/generate", json("POST", body));
+      }
       refetch();
       onCreated?.(created);
       onClose();
@@ -181,8 +229,12 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
 
   return (
     <Modal
-      title="Mesh editor"
-      subtitle="Geometry re-renders as you edit. Nothing reaches the board until you save or generate."
+      title={isVariant ? "Mesh editor — new variant" : "Mesh editor"}
+      subtitle={
+        isVariant
+          ? `Derived from “${variantOf.name || variantOf.id}” — only what you change is applied.`
+          : "Geometry re-renders as you edit. Nothing reaches the ledger until you save or generate."
+      }
       onClose={onClose}
       size="full"
       footer={
@@ -191,6 +243,9 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
             className="mesh-editor__generator"
             value={generatorId}
             aria-label="generator"
+            // A variant is the same design as its parent; changing the
+            // generator would make it a different object, not a variant.
+            disabled={isVariant}
             onChange={(e) => {
               setGeneratorId(e.target.value);
               setParams({});
@@ -209,10 +264,38 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
             className="mesh-editor__name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder={`${generatorId} mesh`}
+            placeholder={isVariant ? `${variantOf.name} · …` : `${generatorId} mesh`}
             aria-label="job name"
-            title="Job name — optional, defaults to “<generator> mesh”"
+            title={
+              isVariant
+                ? "Job name — optional, defaults to what changed"
+                : "Job name — optional, defaults to “<generator> mesh”"
+            }
           />
+          <Select
+            className="mesh-editor__design"
+            value={projectId}
+            aria-label="design"
+            title="Design — groups this mesh with its variants and solves"
+            onChange={(e) => setProjectId(e.target.value)}
+          >
+            {(!isVariant || !variantOf?.projectId) && <option value="">unassigned</option>}
+            {(projects || []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+          {isVariant && (
+            <span className="panel-note mesh-editor__delta">
+              {delta.length === 0
+                ? "Nothing changed yet"
+                : `${delta.length} changed: ${delta
+                    .slice(0, 3)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(", ")}${delta.length > 3 ? "…" : ""}`}
+            </span>
+          )}
           <span className="modal-foot-spacer" />
           <button type="button" className="btn btn--ghost" onClick={onClose}>
             Cancel
@@ -220,7 +303,7 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
           <button
             type="button"
             className="btn"
-            disabled={!generatorId || invalid || busy !== null}
+            disabled={!generatorId || invalid || busy !== null || nothingToSubmit}
             onClick={() => submit("draft")}
           >
             {busy === "draft" ? "Saving…" : "Save draft"}
@@ -228,7 +311,7 @@ export function MeshEditor({ generators, initialGeneratorId, api, refetch, onClo
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!generatorId || invalid || busy !== null}
+            disabled={!generatorId || invalid || busy !== null || nothingToSubmit}
             onClick={() => submit("now")}
           >
             {busy === "now" ? "Starting…" : "Generate now"}

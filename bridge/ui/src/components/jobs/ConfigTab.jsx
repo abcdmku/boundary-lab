@@ -175,6 +175,14 @@ export function ConfigTab({ job, jobs, generators, targets, api, refetch, notify
   // ---------- editable: drafts ----------
   const mesh = job.kind === "solve" ? (jobs || []).find((j) => j.id === job.parentJobId) : null;
   const target = (targets || []).find((t) => t.id === targetId);
+  const meshReady = job.kind !== "solve" || mesh?.status === "done";
+  const launchBlockedReason = !meshReady
+    ? mesh
+      ? `Wait for “${mesh.name}” to finish before launching this solve`
+      : "The source mesh no longer exists"
+    : target && !target.available
+      ? target.unavailableReason || `${target.label} is unavailable`
+      : null;
 
   return (
     <div className="field-stack">
@@ -213,9 +221,11 @@ export function ConfigTab({ job, jobs, generators, targets, api, refetch, notify
         <SchemaForm schema={schema} values={params} onChange={setParams} errors={errors} />
       )}
 
-      {job.kind === "solve" && mesh && mesh.status !== "done" && (
+      {job.kind === "solve" && !meshReady && (
         <div className="notice notice--warn">
-          The mesh “{mesh.name}” is {mesh.status}. Launching is refused until it is done.
+          {mesh
+            ? `The mesh “${mesh.name}” is ${mesh.status}. Launching is unavailable until it is done.`
+            : "The source mesh no longer exists, so this solve cannot be launched."}
         </div>
       )}
 
@@ -227,12 +237,8 @@ export function ConfigTab({ job, jobs, generators, targets, api, refetch, notify
           type="button"
           className="btn btn--primary"
           onClick={launch}
-          disabled={invalid || saving}
-          title={
-            target && !target.available
-              ? target.unavailableReason
-              : "Save any edits and queue this job"
-          }
+          disabled={invalid || saving || !!launchBlockedReason}
+          title={launchBlockedReason || "Save any edits and queue this job"}
         >
           {dirty ? "Save & launch" : "Launch"}
         </button>

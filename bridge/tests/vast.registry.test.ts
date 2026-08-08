@@ -65,7 +65,7 @@ test("an entry persists to the vast section of state.json", () => {
   assert.equal(persisted.vast.instances.length, 1);
   assert.equal(persisted.vast.instances[0].id, 20250806);
   assert.ok(Array.isArray(persisted.jobs), "the job ledger must be untouched");
-  assert.equal(persisted.version, 2);
+  assert.equal(persisted.version, store.STATE_VERSION);
 });
 
 test("adding the same id twice replaces rather than duplicates", () => {
