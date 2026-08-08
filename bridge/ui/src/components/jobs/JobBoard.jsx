@@ -232,7 +232,7 @@ export function JobBoard({
             type="button"
             className="btn btn--sm"
             onClick={() => onOpenDialog({ type: "mesh" })}
-            title="Configure a mesh job from a generator's schema"
+            title="Open the live mesh editor: shape the geometry, then save or generate"
           >
             <Plus size={12} aria-hidden /> Mesh
           </button>

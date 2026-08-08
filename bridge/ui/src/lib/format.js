@@ -51,3 +51,16 @@ export function fmtDuration(seconds) {
 export function fmtNum(v, places = 2) {
   return typeof v === "number" && Number.isFinite(v) ? v.toFixed(places) : "—";
 }
+
+/** "1.1 GiB" — binary units, matching the python layer's VRAM estimates. */
+export function fmtBytes(v) {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = v;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i += 1;
+  }
+  return `${i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
+}

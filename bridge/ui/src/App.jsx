@@ -3,7 +3,7 @@ import { Topbar } from "./components/Topbar.jsx";
 import { Rail } from "./components/rail/Rail.jsx";
 import { JobBoard } from "./components/jobs/JobBoard.jsx";
 import { ComputeView } from "./components/compute/ComputeView.jsx";
-import { NewMeshDialog } from "./components/jobs/NewMeshDialog.jsx";
+import { MeshEditor } from "./components/jobs/MeshEditor.jsx";
 import { SolveDialog } from "./components/jobs/SolveDialog.jsx";
 import { BatchDialog } from "./components/jobs/BatchDialog.jsx";
 import { Toasts } from "./components/Toasts.jsx";
@@ -77,7 +77,7 @@ export default function App() {
       </div>
 
       {dialog?.type === "mesh" && (
-        <NewMeshDialog
+        <MeshEditor
           generators={state?.generators || []}
           initialGeneratorId={dialog.generatorId}
           api={api}

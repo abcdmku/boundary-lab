@@ -27,6 +27,7 @@ Dashboard: http://127.0.0.1:4821 — MCP: `POST http://127.0.0.1:4821/mcp`
 | `PYTHON` | `python` | interpreter with `blab` installed |
 | `BLAB_JULIA_EXECUTABLE` | Julia 1.12.6 install path | passed to solver children |
 | `BRIDGE_REMOTE_CONCURRENCY` | `1` | default concurrent jobs per remote instance |
+| `BLAB_PREVIEW_IDLE_SECONDS` | `300` | idle time before the mesh-editor preview worker is shut down |
 | `T3_BASE_URL` / `T3_TOKEN` | unset | optional; enables thread spawn + wake-up |
 
 Without t3 configured everything works except thread orchestration.
@@ -89,7 +90,7 @@ are baked in at create time and are not added to existing instances.
 
 - `src/` — server: config, store, targets, queue (per-target lanes), MCP tools, t3 client
 - `src/vast/` — vast.ai compute provider: client, instance registry, SSH provisioning, `/api/vast` routes
-- `py/` — Python glue: `blabctl.py` (NDJSON CLI) + `generators/` (ATH waveguide, procedural axisymmetric horn)
+- `py/` — Python glue: `blabctl.py` (NDJSON CLI), `mesh_preview_worker.py` (warm worker behind the live mesh editor) + `generators/` (ATH waveguide, procedural axisymmetric horn)
 - `provision/` — `vast_bootstrap.sh`, the idempotent remote installer
 - `ui/` — dashboard (Vite + React)
 - `tests/` — `npm test` (node:test + fixtures; never touches the network)
@@ -331,6 +332,41 @@ a change ping and refetch if you prefer.
 
 ### `GET /artifacts/:jobId/*`
 Serves a file from the job's directory (path-traversal guarded).
+
+## Live mesh preview
+
+The mesh editor (the `+ Mesh` button) renders geometry as you edit. Previews are
+**not jobs**: no board row, no run directory, no queue slot — they must never wait
+behind a solve. `src/preview.ts` runs one warm python worker
+(`py/mesh_preview_worker.py`) that holds the gmsh/meshio imports, which otherwise
+dominate the round trip; a render costs ~0.2 s instead of ~1 s.
+
+One request is in flight at a time (gmsh is not reentrant), with at most one
+*queued* request per session — a newer edit supersedes the older one rather than
+queueing behind it, so dragging a slider costs one render per settle. The worker is
+started on first use and shut down after `BLAB_PREVIEW_IDLE_SECONDS` (default 300)
+of silence, or after 200 renders, whichever comes first.
+
+### `POST /api/preview`
+```jsonc
+{ "sessionId": "ed-…",       // [A-Za-z0-9_-]{1,64}; names a scratch directory
+  "generator": "slot_cd_horn",
+  "params": { … } }          // sparse; the generator's schema defaults fill the rest
+```
+→ `{ seq, wallsUrl, drivenUrl, triangles, vertices, bboxMm, mirrorAxes,
+qualityWarning, vramBytes, elapsedMs, params }`, where `params` is the full set
+*after* defaults. → `{ "superseded": true }` if a newer edit from the same session
+overtook this one before it ran. **422** when the generator rejects the parameters —
+a normal answer while someone is still typing, not a server fault.
+
+### `GET /api/preview/:sessionId/:seq/:file`
+The two STLs a render produced (`preview_walls.stl`, `preview_driven.stl`, allowlisted).
+Each render gets its own `seq` directory, so a URL's contents never change; only the
+newest three are kept.
+
+### `DELETE /api/preview/:sessionId`
+Drops that editor's scratch geometry. The UI calls this on close; the bridge also
+sweeps sessions untouched for 30 minutes, because browsers close without warning.
 
 ---
 

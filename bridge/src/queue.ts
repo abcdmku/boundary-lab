@@ -214,7 +214,12 @@ export function cancel(jobId: string) {
   }
 }
 
-function killTree(child: ChildProcess) {
+/**
+ * Kill a python child and everything under it. Exported because the preview
+ * worker (src/preview.ts) has the same problem this solves: its generators
+ * shell out to Ath.exe, and a lone kill of python would leave that orphaned.
+ */
+export function killTree(child: ChildProcess) {
   if (!child.pid) return;
   if (process.platform === "win32") {
     // taskkill /T takes the whole tree — python child + any Julia grandchildren.

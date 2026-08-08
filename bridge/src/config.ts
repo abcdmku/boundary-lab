@@ -47,6 +47,15 @@ export const config = {
   python: process.env.PYTHON ?? "python",
   /** The python CLI shim over blab (mesh generation + BEM solves). */
   blabctl: process.env.BLABCTL ?? path.join(repoRoot, "bridge", "py", "blabctl.py"),
+  /**
+   * Warm NDJSON worker behind the live mesh editor's preview loop. Kept
+   * separate from blabctl on purpose: blabctl is one-shot per job, and the
+   * editor needs the gmsh/meshio imports to survive between keystrokes.
+   */
+  previewWorker:
+    process.env.BLAB_PREVIEW_WORKER ?? path.join(repoRoot, "bridge", "py", "mesh_preview_worker.py"),
+  /** Idle seconds before the warm preview worker is shut down again. */
+  previewIdleSeconds: positiveNumber(process.env.BLAB_PREVIEW_IDLE_SECONDS, 300, "BLAB_PREVIEW_IDLE_SECONDS"),
   dataDir: process.env.DATA_DIR ?? path.join(bridgeRoot, "data"),
   t3BaseUrl: process.env.T3_BASE_URL?.replace(/\/$/, "") ?? null,
   t3Token: process.env.T3_TOKEN ?? null,
