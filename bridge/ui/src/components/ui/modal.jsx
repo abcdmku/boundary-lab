@@ -34,8 +34,39 @@ export function Modal({ title, subtitle, onClose, children, footer, size = "md",
     (focusable ?? panel)?.focus();
     const onKey = (e) => {
       if (e.key === "Escape") {
+        // A plot/mesh preview is a child surface above this dialog. Let the
+        // lightbox own the first Escape instead of closing its parent out from
+        // under it.
+        if (document.querySelector(".lightbox-overlay")) return;
+        e.preventDefault();
         e.stopPropagation();
         onCloseRef.current();
+        return;
+      }
+      if (e.key === "Tab" && panel) {
+        const focusables = [
+          ...panel.querySelectorAll(
+            "a[href], button:not(:disabled), input:not(:disabled):not([type=hidden]), " +
+              "select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+          ),
+        ].filter((element) => element.getClientRects().length > 0);
+        if (!focusables.length) {
+          e.preventDefault();
+          panel.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (
+          e.shiftKey &&
+          (document.activeElement === first || !panel.contains(document.activeElement))
+        ) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     document.addEventListener("keydown", onKey, true);

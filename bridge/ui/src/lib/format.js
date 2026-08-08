@@ -51,3 +51,35 @@ export function fmtDuration(seconds) {
 export function fmtNum(v, places = 2) {
   return typeof v === "number" && Number.isFinite(v) ? v.toFixed(places) : "—";
 }
+
+/**
+ * "42m", "1h20", "18s" — a duration at a glance, for cards that have room for
+ * three or four characters and nothing more. Null/unknown is an em dash on
+ * purpose: a schedule that guesses is worse than one that admits it cannot say.
+ */
+export function fmtShort(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem === 0 ? `${h}h` : `${h}h${String(rem).padStart(2, "0")}`;
+}
+
+/** Clock time `seconds` from now: "14:20". Used for "everything clear by". */
+export function fmtClock(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const at = new Date(Date.now() + seconds * 1000);
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+/** "8k" / "12.5k" / "840" — frequencies and triangle counts, three chars wide. */
+export function fmtCompact(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
+  if (abs >= 1000) return `${(v / 1000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
+  return String(Math.round(v));
+}

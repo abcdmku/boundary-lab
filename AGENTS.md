@@ -10,6 +10,8 @@ this workspace goes through **Boundary Bridge** — an MCP server (`boundary-lab
 - Always pass your absolute working directory as `workspace` on every tool call.
 - `list_generators` → available geometry generators and their parameter schemas.
 - `list_targets` → where solves can run: the local GPU plus any registered remote instances.
+- `list_projects` → the designs this bridge holds. Pass `project: "<name>"` when creating
+  work; an unknown name creates the project, a known one resolves to it.
 - `generate` blocks briefly (seconds) and returns triangle count, bbox, and a preview URL.
 - `solve` returns immediately with a job id. **Never busy-wait.** Poll `get_job`
   occasionally or continue other work; live t3 threads are woken automatically on
@@ -20,15 +22,33 @@ this workspace goes through **Boundary Bridge** — an MCP server (`boundary-lab
   whole sweep with `cancel_jobs {batch_id}`.
 - Jobs can be staged before they run: `create_mesh_jobs` / `create_solve_jobs` +
   `update_job` configure work that only starts when it is explicitly launched.
+- `schedule_jobs` decides where and in what order staged work runs — one move per job,
+  `column` being a target id or `"planned"` to hold it back.
 - Results are compact summaries + URLs. Hand preview/plot URLs to the human — they render
   in a browser and in the dashboard.
 
+## How the work is shaped
+
+```
+project ──┬── mesh (root) ── variants ──…      one design, many geometries
+          └── each mesh ── many solves          coarse look, fine verification, …
+```
+
+- **One mesh, many solves** is the normal case. A coarse preview and a fine verification
+  of one geometry are two solves of the same mesh — do not regenerate the mesh for each.
+- **Produce each optimization trial with `create_mesh_variant`**, not `generate`. It
+  patches the parent's params (pass only what changes), records the lineage and inherits
+  the project, so a campaign reads as a chain of edits instead of N unrelated meshes.
+- **File work under a project** so its variants and results stay together.
+
 ## Hard rules on this machine
 
-- **One GPU task at a time.** The bridge's `local:solve` queue lane enforces this
-  structurally — never run `blab solve` directly while bridge jobs are queued or running,
-  and never run two CUDA solves concurrently by any path. (Remote targets get their own
-  lanes and do run in parallel; that does not relax the rule for this machine.)
+- **One GPU task at a time.** The bridge's `local:solve` lane has ONE slot by default and
+  enforces this structurally — never run `blab solve` directly while bridge jobs are
+  queued or running, and never run two CUDA solves concurrently by any path. (Remote
+  targets get their own lanes and do run in parallel; that does not relax the rule here.)
+  The slot count is the human's to raise (schedule board / `set_target_slots`), and on
+  this single-GPU box it should stay at 1 — do not raise it on your own.
 - **Iteration meshes stay ≤ ~9k triangles** (6.8k ≈ 30 s on this GPU; 13.6k ≈ 1 h+).
   Use fine meshes only for final verification runs.
 - Default backend is `beat_cuda`.

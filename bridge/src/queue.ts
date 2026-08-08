@@ -1,16 +1,26 @@
 /**
- * The job queue: one lane per execution target.
+ * The job queue: one lane per execution target, each lane a row of slots.
  *
  *   'local:mesh'          — generate jobs on this machine (fast, 5 min timeout)
  *   'local:solve'         — BEM solves on this machine's GPU (long, 4 h timeout)
  *   'remote:<instanceId>' — BEM solves dispatched to a remote solver server
  *
- * HARD RULE (GPU safety on this machine): the LOCAL lanes must never run two
- * jobs at once. That is enforced structurally — `local:*` lanes are built with
- * concurrency 1 and pump() only starts a job while `active.size < concurrency`.
- * Remote lanes get their concurrency from the target registry (default 1 per
- * instance), so N cloud instances run N solves in parallel while local stays
- * strictly serialized.
+ * A lane runs up to `slots` jobs at once, and pump() only ever starts a job
+ * while a slot is free. Slot count comes from the target registry, which
+ * defaults every target to 1 — one GPU, one job — and lets the user raise it
+ * per target on the schedule board (a two-GPU box pinned one solve per card, a
+ * big remote running two small meshes side by side). The local MESH lane is
+ * the one exception that stays hard-wired to 1: meshing is seconds of CPU work
+ * and serialising it costs nothing.
+ *
+ * When a target pins device ids to its slots, the slot's device is exported to
+ * the child as CUDA_VISIBLE_DEVICES, so "one solve per GPU" is an actual
+ * assignment rather than two processes racing for card 0.
+ *
+ * ORDER is the job's own `priority` (persisted, see store.ts), not arrival
+ * time: dragging a card up the schedule board rewrites priorities, and the
+ * waiting line re-sorts. A restart therefore resumes the order the human
+ * arranged, not the order things happened to be created in.
  *
  * Jobs spawn `PYTHON BLABCTL <args>` (no shell), cwd REPO_ROOT, with
  * BLAB_JULIA_EXECUTABLE/BLAB_JULIA_EXE in the child env. stdout is parsed as
@@ -33,7 +43,8 @@ import path from "node:path";
 import { config, t3Configured } from "./config.ts";
 import * as store from "./store.ts";
 import * as t3 from "./t3.ts";
-import { targetConcurrency, targetLabel } from "./targets.ts";
+import * as estimate from "./estimate.ts";
+import { targetConcurrency, targetDevices, targetIdOf, targetLabel } from "./targets.ts";
 import { threadInfo } from "./threads.ts";
 
 const TIMEOUT_MS: Record<store.JobKind, number> = {
@@ -46,6 +57,10 @@ interface ActiveJob {
   child: ChildProcess;
   cancelled: boolean;
   timedOut: boolean;
+  /** Which of the lane's slots this job occupies. */
+  slot: number;
+  /** Device pinned to that slot, if the target has any. */
+  device?: string;
 }
 
 interface Lane {
@@ -55,6 +70,9 @@ interface Lane {
   targetId: string;
   label: string;
   concurrency: number;
+  /** Device id per slot, in slot order. Empty when nothing is pinned. */
+  devices: string[];
+  /** Waiting jobs, kept sorted by the persisted `priority`. */
   queue: string[];
   /** Insertion-ordered so queue positions are stable. */
   active: Map<string, ActiveJob>;
@@ -74,30 +92,60 @@ export function laneKeyFor(job: Pick<store.Job, "kind" | "target">): string {
   return `remote:${target.instanceId ?? target.serverUrl}`;
 }
 
+/**
+ * Slots and pinned devices for a lane. The local MESH lane is fixed at one:
+ * meshing is short CPU work, and a second concurrent gmsh buys nothing while
+ * costing the "did my mesh start?" clarity of a single serial line.
+ */
+function laneCapacity(job: store.Job): { concurrency: number; devices: string[] } {
+  if (laneKeyFor(job) === LOCAL_MESH_LANE) return { concurrency: 1, devices: [] };
+  return { concurrency: targetConcurrency(job.target), devices: targetDevices(job.target) };
+}
+
 function ensureLane(job: store.Job): Lane {
   const key = laneKeyFor(job);
   const isLocal = key === LOCAL_MESH_LANE || key === LOCAL_SOLVE_LANE;
-  // Local concurrency is not configurable: one GPU, one job.
-  const concurrency = isLocal ? 1 : targetConcurrency(job.target);
+  const { concurrency, devices } = laneCapacity(job);
   let lane = lanes.get(key);
   if (!lane) {
     lane = {
       key,
       kind: job.kind,
-      targetId: isLocal ? "local" : (job.target as { instanceId?: string; serverUrl: string }).instanceId ??
-        (job.target as { serverUrl: string }).serverUrl,
+      targetId: targetIdOf(job.target),
       label: isLocal ? (job.kind === "mesh" ? "local mesh" : "local solve") : targetLabel(job.target),
       concurrency,
+      devices,
       queue: [],
       active: new Map(),
     };
     lanes.set(key, lane);
   } else {
-    // A remote instance's configured concurrency can change while the bridge
-    // runs (registry refresh) — pick it up, but never below the running count.
+    // Slot count and device pinning can change while the bridge runs (a
+    // registry refresh, or the user moving the slot stepper) — pick them up.
+    // Lowering below the running count never kills anything: pump() simply
+    // starts nothing new until the extra jobs drain.
     lane.concurrency = concurrency;
+    lane.devices = devices;
   }
   return lane;
+}
+
+/** Lowest slot index not currently occupied in this lane. */
+function freeSlot(lane: Lane): number {
+  const taken = new Set([...lane.active.values()].map((a) => a.slot));
+  for (let i = 0; i < Math.max(1, lane.concurrency); i++) if (!taken.has(i)) return i;
+  return lane.active.size; // should be unreachable — pump() checks capacity first
+}
+
+/** Keep the waiting line in the order the human arranged it. */
+function sortQueue(lane: Lane) {
+  lane.queue.sort((a, b) => {
+    const ja = store.getJob(a);
+    const jb = store.getJob(b);
+    if (!ja || !jb) return 0;
+    const diff = store.priorityOf(ja) - store.priorityOf(jb);
+    return diff !== 0 ? diff : ja.createdAt.localeCompare(jb.createdAt);
+  });
 }
 
 /** Drop an idle remote lane so the snapshot does not accumulate dead instances. */
@@ -109,8 +157,13 @@ function pruneLane(lane: Lane) {
 const laneIds = (lane: Lane) => [...lane.active.keys(), ...lane.queue];
 
 /**
- * Lane-by-lane view of the queue, execution order first. The two local lanes
- * are always present so the UI has a stable frame even when idle.
+ * Lane-by-lane view of the queue, execution order first, with the timing the
+ * schedule board draws. The two local lanes are always present so the UI has a
+ * stable frame even when idle.
+ *
+ * `forecast` is computed here, once per snapshot, rather than per card in the
+ * UI: when a job starts depends on every job ahead of it in the same lane, so
+ * it is a lane-level answer by construction.
  */
 export function queueSnapshot() {
   for (const seed of [
@@ -123,21 +176,36 @@ export function queueSnapshot() {
         kind: seed.kind,
         targetId: "local",
         label: seed.kind === "mesh" ? "local mesh" : "local solve",
-        concurrency: 1,
+        concurrency: seed.kind === "mesh" ? 1 : targetConcurrency(undefined),
+        devices: seed.kind === "mesh" ? [] : targetDevices(undefined),
         queue: [],
         active: new Map(),
       });
   }
+  const pool = estimate.historySamples();
   return {
-    lanes: [...lanes.values()].map((lane) => ({
-      key: lane.key,
-      kind: lane.kind,
-      targetId: lane.targetId,
-      label: lane.label,
-      concurrency: lane.concurrency,
-      active: [...lane.active.keys()],
-      queued: [...lane.queue],
-    })),
+    lanes: [...lanes.values()].map((lane) => {
+      sortQueue(lane);
+      const active = [...lane.active.keys()];
+      const queued = [...lane.queue];
+      return {
+        key: lane.key,
+        kind: lane.kind,
+        targetId: lane.targetId,
+        label: lane.label,
+        concurrency: lane.concurrency,
+        devices: lane.devices,
+        /** Slot index (and pinned device) per running job — the slot row. */
+        slots: [...lane.active.values()].map((a) => ({
+          jobId: a.jobId,
+          slot: a.slot,
+          ...(a.device !== undefined ? { device: a.device } : {}),
+        })),
+        active,
+        queued,
+        forecast: estimate.laneForecast(active, queued, lane.concurrency, pool),
+      };
+    }),
   };
 }
 
@@ -151,6 +219,7 @@ function findLane(jobId: string): Lane | undefined {
 export const queuePosition = (jobId: string): number => {
   const lane = findLane(jobId);
   if (!lane) return 0;
+  sortQueue(lane);
   return laneIds(lane).indexOf(jobId) + 1;
 };
 
@@ -168,6 +237,7 @@ export function enqueue(jobId: string) {
   const lane = ensureLane(job);
   if (lane.queue.includes(jobId) || lane.active.has(jobId)) return;
   lane.queue.push(jobId);
+  sortQueue(lane);
   pump(lane);
 }
 
@@ -190,6 +260,98 @@ export function removeQueued(jobId: string) {
       pruneLane(lane);
     }
   }
+}
+
+/** Waiting job ids of a lane, in execution order. Empty for an unknown lane. */
+export function laneQueue(laneKey: string): string[] {
+  const lane = lanes.get(laneKey);
+  if (!lane) return [];
+  sortQueue(lane);
+  return [...lane.queue];
+}
+
+/**
+ * Rewrite a lane's waiting order — the drag-and-drop write path.
+ *
+ * `orderedIds` is the order the human dropped the cards in; ids that are not
+ * actually waiting in this lane are ignored, and any waiting job the caller
+ * forgot keeps its relative place at the END rather than being silently
+ * dropped from the queue. Running jobs are untouched: a started solve's place
+ * in the world is "running", not a position.
+ *
+ * Returns the resulting order.
+ */
+export function reorderLane(laneKey: string, orderedIds: string[]): string[] {
+  const lane = lanes.get(laneKey);
+  if (!lane) return [];
+  const waiting = new Set(lane.queue);
+  const wanted = orderedIds.filter((id) => waiting.has(id));
+  const seen = new Set(wanted);
+  sortQueue(lane);
+  const final = [...wanted, ...lane.queue.filter((id) => !seen.has(id))];
+  store.reorderPriorities(final);
+  lane.queue = final;
+  // A reorder never starts work on its own — but if the lane had free slots
+  // and the newly-first job is startable, there is no reason to make it wait.
+  pump(lane);
+  return final;
+}
+
+/**
+ * Point a not-yet-started job at a different target: the cross-column drag.
+ *
+ * Safe by construction for drafts (never queued) and for QUEUED jobs (no child
+ * process exists yet, and `buildArgs` reads the target at spawn time). A
+ * running job is refused — its blabctl child is already talking to the box it
+ * was dispatched to.
+ *
+ * `position` is an index into the destination lane's waiting line; omit it to
+ * append. Returns false when the job is not in a movable state.
+ */
+export function retarget(
+  jobId: string,
+  target: store.JobTarget,
+  position?: number,
+): boolean {
+  const job = store.getJob(jobId);
+  if (!job) return false;
+  if (job.status === "running" || isRunning(jobId)) return false;
+  if (job.status !== "draft" && job.status !== "queued") return false;
+
+  removeQueued(jobId);
+  store.updateJob(jobId, { target });
+  const moved = store.getJob(jobId)!;
+  if (moved.status !== "queued") return true; // a draft just records its new target
+
+  const lane = ensureLane(moved);
+  sortQueue(lane);
+  place(lane, jobId, position);
+  pump(lane);
+  return true;
+}
+
+/**
+ * Insert a job into a lane's waiting line at `position`, giving it a priority
+ * strictly between its new neighbours so the placement survives a restart.
+ */
+function place(lane: Lane, jobId: string, position?: number) {
+  const others = lane.queue.filter((id) => id !== jobId);
+  const at = position === undefined ? others.length : Math.max(0, Math.min(position, others.length));
+  others.splice(at, 0, jobId);
+  lane.queue = others;
+  store.reorderPriorities(others);
+}
+
+/** Move a waiting job to an explicit position within the lane it is already in. */
+export function moveWithinLane(jobId: string, position: number): boolean {
+  for (const lane of lanes.values()) {
+    if (!lane.queue.includes(jobId)) continue;
+    sortQueue(lane);
+    place(lane, jobId, position);
+    pump(lane);
+    return true;
+  }
+  return false;
 }
 
 export function cancel(jobId: string) {
@@ -255,6 +417,7 @@ export function shutdownAll(reason: string) {
 }
 
 function pump(lane: Lane) {
+  sortQueue(lane);
   while (lane.active.size < lane.concurrency) {
     const jobId = lane.queue.shift();
     if (jobId === undefined) break;
@@ -345,6 +508,14 @@ function startJob(job: store.Job, lane: Lane) {
   let errorMsg: string | undefined;
   let spawnError: string | undefined;
 
+  const slot = freeSlot(lane);
+  // Device pinning is a LOCAL concept: it selects which card on THIS machine
+  // the child's CUDA runtime may see. A remote job's blabctl only forwards an
+  // HTTP request, so pinning it here would say nothing about the box that
+  // actually solves — the remote server picks its own device.
+  const isLocalLane = lane.key === LOCAL_MESH_LANE || lane.key === LOCAL_SOLVE_LANE;
+  const device = isLocalLane ? lane.devices[slot] : undefined;
+
   const child = spawn(config.python, [config.blabctl, ...buildArgs(job)], {
     cwd: config.repoRoot,
     env: {
@@ -355,13 +526,26 @@ function startJob(job: store.Job, lane: Lane) {
             BLAB_JULIA_EXE: config.juliaExecutable, // the name blabctl actually reads
           }
         : {}),
+      // One solve per GPU on a multi-card box: the slot owns the device, and
+      // the child can only see that one. Both vendor variables are set so the
+      // CUDA and ROCm backends behave the same way.
+      ...(device !== undefined
+        ? { CUDA_VISIBLE_DEVICES: device, HIP_VISIBLE_DEVICES: device }
+        : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     // POSIX: own process group so killTree can SIGKILL python + Julia together.
     detached: process.platform !== "win32",
   });
-  const active: ActiveJob = { jobId: job.id, child, cancelled: false, timedOut: false };
+  const active: ActiveJob = {
+    jobId: job.id,
+    child,
+    cancelled: false,
+    timedOut: false,
+    slot,
+    ...(device !== undefined ? { device } : {}),
+  };
   lane.active.set(job.id, active);
   if (child.pid) store.setJobPid(job.id, child.pid);
 

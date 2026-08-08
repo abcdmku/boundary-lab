@@ -58,6 +58,7 @@ export function BatchDialog({
   jobs,
   generators,
   targets,
+  projects,
   initialMeshIds,
   initialGeneratorId,
   api,
@@ -66,6 +67,7 @@ export function BatchDialog({
 }) {
   const [kind, setKind] = useState(initialKind || "solve");
   const [batchName, setBatchName] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [meshIds, setMeshIds] = useState(() => new Set(initialMeshIds || []));
   const [meshQuery, setMeshQuery] = useState("");
   const [baseSettings, setBaseSettings] = useState({});
@@ -231,6 +233,7 @@ export function BatchDialog({
           : {
               kind: "mesh",
               ...(batchName.trim() ? { name: batchName.trim() } : {}),
+              ...(projectId ? { project: projectId } : {}),
               generator: generatorId,
               params: baseParams,
               launch,
@@ -358,7 +361,7 @@ export function BatchDialog({
       }
     >
       <div className="field-stack">
-        <div className="field-row field-row--3">
+        <div className={`field-row ${kind === "solve" ? "field-row--3" : "field-row--4"}`}>
           <Field label="kind">
             <Select
               value={kind}
@@ -379,6 +382,18 @@ export function BatchDialog({
               placeholder={kind === "solve" ? "e.g. cd90x60 sweep" : `${generatorId} sweep`}
             />
           </Field>
+          {kind === "mesh" && (
+            <Field label="design" hint="blank = a design named after the batch">
+              <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                <option value="">new, from the name</option>
+                {(projects || []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           {kind === "solve" ? (
             <TargetPicker
               targets={targets}

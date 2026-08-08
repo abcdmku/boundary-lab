@@ -9,17 +9,24 @@ export function PlotsTab({ job, onOpenLightbox }) {
   return (
     <div className="plot-grid">
       {images.map((a) => (
-        <img
+        <button
           key={a.url}
-          src={a.url}
-          alt={a.name}
-          loading="lazy"
-          onClick={() => onOpenLightbox(a.url)}
-          onError={(e) => {
-            e.currentTarget.style.display = "none";
-          }}
-          className="plot-thumb"
-        />
+          type="button"
+          className="plot-open"
+          onClick={() => onOpenLightbox(a.url, a.name)}
+          aria-label={`Open ${a.name}`}
+        >
+          <img
+            src={a.url}
+            alt={a.name}
+            loading="lazy"
+            onError={(e) => {
+              const tile = e.currentTarget.closest("button");
+              if (tile) tile.style.display = "none";
+            }}
+            className="plot-thumb"
+          />
+        </button>
       ))}
     </div>
   );

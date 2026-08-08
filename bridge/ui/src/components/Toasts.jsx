@@ -1,7 +1,12 @@
 export function Toasts({ toasts }) {
   if (!toasts.length) return null;
   return (
-    <div className="fixed top-14 right-4 z-20 flex flex-col gap-2">
+    <div
+      className="toast-stack fixed top-14 right-4 flex flex-col gap-2"
+      role="status"
+      aria-live="polite"
+      aria-atomic="false"
+    >
       {toasts.map((t) => (
         <div
           key={t.id}

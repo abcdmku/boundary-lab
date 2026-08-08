@@ -15,6 +15,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { config } from "./config.ts";
+import * as store from "./store.ts";
 import type { JobTarget } from "./store.ts";
 
 export interface ComputeTarget {
@@ -24,8 +25,25 @@ export interface ComputeTarget {
   label: string;
   /** Remote only: base URL blabctl talks to (--server-url). */
   serverUrl?: string;
-  /** Max concurrent solve jobs on this target. Local is always 1 (GPU rule). */
+  /**
+   * How many solves may run on this target at once — the slot count the
+   * schedule board draws. Defaults to 1 everywhere (one GPU, one job) and is
+   * user-configurable per target: see setTargetConfig.
+   */
   concurrency: number;
+  /**
+   * Optional device id per slot, in slot order (e.g. ["0","1"] on a two-GPU
+   * box). When present, slot i's job runs with CUDA_VISIBLE_DEVICES=devices[i],
+   * so "one solve per GPU" is a real pin rather than a hope.
+   */
+  devices?: string[];
+  /** True when concurrency came from the user, not the provider's default. */
+  slotsOverridden?: boolean;
+  /** The provider cannot honor a different slot count (for example, a managed
+   * server provisioned with a fixed worker limit). */
+  slotsLocked?: boolean;
+  /** User-facing explanation for a locked slot count. */
+  slotLockReason?: string;
   /**
    * Can this target take work RIGHT NOW? A rented box that is still
    * provisioning, or has not passed a health check, is listed (so the UI can
@@ -52,15 +70,124 @@ export const DEFAULT_REMOTE_CONCURRENCY = Math.max(
   Number(process.env.BRIDGE_REMOTE_CONCURRENCY ?? 1) || 1,
 );
 
-const localTarget = (): ComputeTarget => ({
-  id: LOCAL_TARGET_ID,
-  type: "local",
-  label: "Local GPU",
-  // HARD RULE: one solve at a time on this machine's GPU. Not configurable.
-  concurrency: 1,
-  available: true,
-  status: "ready",
-});
+/**
+ * Per-target scheduling configuration the user set on the schedule board.
+ *
+ * Historically the local lane was pinned to concurrency 1 in code, on the
+ * "one GPU, one job" rule. That rule is right as a DEFAULT and wrong as a law:
+ * a two-GPU box wants one solve per card, and a small mesh on a large card can
+ * genuinely share. So the number is now the user's, defaulting to 1 — the safe
+ * behaviour is what you get by doing nothing, and raising it is a deliberate,
+ * visible act with a warning attached (see the UI's slot stepper).
+ *
+ * Lives in state.json's "targetSlots" feature section so it survives restarts
+ * and instance re-provisioning.
+ */
+export interface TargetConfig {
+  /** Concurrent solves allowed. Omitted = the provider's default. */
+  slots?: number;
+  /** Device id per slot, e.g. ["0","1"]. Length wins over `slots` when longer. */
+  devices?: string[];
+}
+
+const SLOTS_SECTION = "targetSlots";
+/** A lane wide enough to thrash any GPU is a typo, not a plan. */
+const MAX_SLOTS = 16;
+
+const readSlotConfig = (): Record<string, TargetConfig> =>
+  store.readSection<Record<string, TargetConfig>>(SLOTS_SECTION, {});
+
+export const getTargetConfig = (id: string): TargetConfig => readSlotConfig()[id] ?? {};
+
+/**
+ * Set (or clear) a target's slot count and device pinning. Passing `slots:
+ * null` / `devices: null` drops the override and returns the target to its
+ * provider default. Returns the stored config.
+ */
+export function setTargetConfig(
+  id: string,
+  patch: { slots?: number | null; devices?: string[] | null },
+): TargetConfig {
+  const all = { ...readSlotConfig() };
+  const next: TargetConfig = { ...(all[id] ?? {}) };
+  if (patch.slots !== undefined) {
+    if (patch.slots === null) delete next.slots;
+    else {
+      if (!Number.isFinite(patch.slots) || patch.slots < 1)
+        throw new TargetError("slots must be a positive integer");
+      if (patch.slots > MAX_SLOTS)
+        throw new TargetError(`slots is capped at ${MAX_SLOTS} — that is a typo, not a plan`);
+      next.slots = Math.floor(patch.slots);
+    }
+  }
+  if (patch.devices !== undefined) {
+    if (patch.devices === null || patch.devices.length === 0) delete next.devices;
+    else {
+      if (patch.devices.length > MAX_SLOTS)
+        throw new TargetError(`at most ${MAX_SLOTS} devices`);
+      next.devices = patch.devices.map((d) => String(d).trim()).filter(Boolean);
+    }
+  }
+  if (Object.keys(next).length === 0) delete all[id];
+  else all[id] = next;
+  store.writeSection(SLOTS_SECTION, all);
+  return next;
+}
+
+/** Refuse a slot override that a fixed-capacity provider cannot honor. */
+export function assertTargetSlotsConfigurable(
+  target: ComputeTarget,
+  patch: { slots?: number | null; devices?: string[] | null },
+) {
+  if (!target.slotsLocked) return;
+  // `null` clears an obsolete persisted override and is safe even for a
+  // provider-managed target.
+  const changesSlots =
+    patch.slots !== undefined && patch.slots !== null && patch.slots !== target.concurrency;
+  const changesDevices = patch.devices !== undefined && patch.devices !== null;
+  if (changesSlots || changesDevices) {
+    throw new TargetError(
+      target.slotLockReason || `${target.label} has a provider-managed slot count`,
+      409,
+    );
+  }
+}
+
+/**
+ * Apply the user's slot config over whatever the provider declared. An explicit
+ * `slots` always wins — including downwards, so a provider that advertises four
+ * can be held to one. Listing devices without a count means "one slot per
+ * device", the multi-GPU case.
+ */
+function withSlotConfig(target: ComputeTarget): ComputeTarget {
+  // A managed server's advertised capacity is authoritative. In particular,
+  // ignore an override left behind by an older UI that offered false controls.
+  if (target.slotsLocked) return { ...target };
+  const cfg = getTargetConfig(target.id);
+  const requested = cfg.slots ?? cfg.devices?.length ?? target.concurrency ?? 1;
+  const concurrency = Math.min(MAX_SLOTS, Math.max(1, Math.floor(requested) || 1));
+  // More slots than pinned devices is legal (the extra slots just do not pin);
+  // more devices than slots means the tail is unused, so trim it for display.
+  const devices = cfg.devices?.slice(0, concurrency);
+  return {
+    ...target,
+    concurrency,
+    ...(devices?.length ? { devices } : {}),
+    ...(cfg.slots !== undefined || cfg.devices?.length ? { slotsOverridden: true } : {}),
+  };
+}
+
+const localTarget = (): ComputeTarget =>
+  withSlotConfig({
+    id: LOCAL_TARGET_ID,
+    type: "local",
+    label: "Local GPU",
+    // One GPU, one job — the default, and the only value you get without
+    // deliberately raising it on the schedule board.
+    concurrency: 1,
+    available: true,
+    status: "ready",
+  });
 
 type Provider = () => ComputeTarget[];
 const providers: Provider[] = [];
@@ -89,12 +216,14 @@ export function listTargets(): ComputeTarget[] {
     for (const target of contributed) {
       if (!target?.id || seen.has(target.id)) continue;
       seen.add(target.id);
-      out.push({
-        ...target,
-        type: "remote",
-        concurrency: Math.max(1, target.concurrency || DEFAULT_REMOTE_CONCURRENCY),
-        available: target.available !== false,
-      });
+      out.push(
+        withSlotConfig({
+          ...target,
+          type: "remote",
+          concurrency: Math.max(1, target.concurrency || DEFAULT_REMOTE_CONCURRENCY),
+          available: target.available !== false,
+        }),
+      );
     }
   }
   return out;
@@ -103,18 +232,29 @@ export function listTargets(): ComputeTarget[] {
 export const getTarget = (id: string): ComputeTarget | undefined =>
   listTargets().find((t) => t.id === id);
 
+/** The registry id a stored JobTarget corresponds to. */
+export const targetIdOf = (target: JobTarget | undefined): string =>
+  !target || target.type === "local" ? LOCAL_TARGET_ID : (target.instanceId ?? target.serverUrl);
+
 /**
  * Concurrency for the lane a job's target maps to. Unknown remote instances
  * (pinned by raw serverUrl, or registered after the job was created) get the
  * default — never more, so an unrecognised target can't stampede.
  */
 export function targetConcurrency(target: JobTarget | undefined): number {
+  const known = getTarget(targetIdOf(target));
+  if (known) return Math.max(1, known.concurrency);
   if (!target || target.type === "local") return 1;
-  if (target.instanceId) {
-    const known = getTarget(target.instanceId);
-    if (known) return Math.max(1, known.concurrency);
-  }
   return DEFAULT_REMOTE_CONCURRENCY;
+}
+
+/**
+ * Device ids pinned to this target's slots, in slot order. Empty when the user
+ * has not pinned any — the solve then sees whatever the machine's default
+ * device selection is, which is the right behaviour on a single-GPU box.
+ */
+export function targetDevices(target: JobTarget | undefined): string[] {
+  return getTarget(targetIdOf(target))?.devices ?? [];
 }
 
 export class TargetError extends Error {

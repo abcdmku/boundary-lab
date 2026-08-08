@@ -88,6 +88,36 @@
   margin-left: auto;
 }
 
+.toast-stack {
+  z-index: 80;
+}
+
+@media (max-width: 700px) {
+  .modal-overlay {
+    padding: 12px;
+  }
+  .modal-panel {
+    max-height: calc(100vh - 24px);
+  }
+  .modal-head,
+  .modal-body,
+  .modal-foot {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .modal-foot {
+    flex-wrap: wrap;
+  }
+  .modal-foot > .panel-note {
+    flex: 1 0 100%;
+  }
+  .field-row--2,
+  .field-row--3,
+  .field-row--4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ----------------------------------------------------------- form fields --- */
 .field {
   display: block;

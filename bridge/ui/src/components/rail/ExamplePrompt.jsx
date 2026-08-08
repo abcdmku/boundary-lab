@@ -29,9 +29,19 @@ export function ExamplePrompt({ text }) {
   };
 
   return (
-    <div
+    <button
+      type="button"
       className="group/prompt mt-1 mb-1.5 ml-5 flex cursor-pointer items-start gap-1.5 border-l-2 border-border py-0.5
                  pl-2.5 text-[12px] leading-snug italic text-muted-foreground transition-colors hover:text-foreground"
+      style={{
+        width: "calc(100% - 1.25rem)",
+        borderTop: 0,
+        borderRight: 0,
+        borderBottom: 0,
+        background: "transparent",
+        fontFamily: "inherit",
+        textAlign: "left",
+      }}
       title="Click to copy"
       onClick={copy}
     >
@@ -48,6 +58,6 @@ export function ExamplePrompt({ text }) {
           className="mt-0.5 shrink-0 opacity-0 transition-opacity group-hover/prompt:opacity-60"
         />
       )}
-    </div>
+    </button>
   );
 }
